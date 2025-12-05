@@ -1,6 +1,5 @@
 import matplotlib.pyplot as plt
 from cycler import cycler
-
 def set_plot_style(
     style="light",
     font="Times New Roman",
@@ -10,6 +9,10 @@ def set_plot_style(
 ):
     cmap = plt.get_cmap("plasma")
     colors = [cmap(i / (n_colors - 1)) for i in range(n_colors)]
+
+    # --- If dark mode: overwrite the first color with white ---
+    if style == "dark":
+        colors[0] = (1.0, 1.0, 1.0, 1.0)   # RGBA white
 
     light = dict(
         figure_facecolor="#FFFFFF",
@@ -42,8 +45,8 @@ def set_plot_style(
         "figure.facecolor": theme["figure_facecolor"],
         "axes.edgecolor": theme["axes_edgecolor"],
         "axes.labelcolor": theme["text_color"],
-        "axes.titlecolor": theme["text_color"],   # <-- title color
-        "text.color": theme["text_color"],        # <-- misc text (incl. suptitle)
+        "axes.titlecolor": theme["text_color"],
+        "text.color": theme["text_color"],
         "xtick.color": theme["tick_color"],
         "ytick.color": theme["tick_color"],
         "grid.color": theme["grid_color"],
@@ -67,7 +70,7 @@ def set_plot_style(
         # Legend
         "legend.frameon": False,
         "legend.fontsize": base_fontsize - 1,
-        "legend.labelcolor": theme["text_color"], # <-- legend text color
+        "legend.labelcolor": theme["text_color"],
 
         # Colormap
         "image.cmap": "plasma",
