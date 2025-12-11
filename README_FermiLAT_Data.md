@@ -57,7 +57,7 @@ Can set `--mchi` to change the dark matter mass
 Can set `--filename` to change the input filename (automatically generated name from `extract_spectrum.py` is `spectrum_data.txt`)
 
 ```bash
-python Fermi-LAT_analysis.py --is-cosmic --mchi 1e19 --filename spectrum_data.txt
+python Fermi-LAT_analysis_coupling.py --is-cosmic --y_eff 1e4 --filename spectrum_data.txt
 ```
 
 ---
