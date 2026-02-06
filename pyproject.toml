@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paper-check-helpers"
+version = "0.1.0"
+description = "Local helper utilities for plotting and analysis"
+requires-python = ">=3.10"
+dependencies = [
+  "matplotlib",
+  "cycler",
+  "pillow",
+]
+
+[tool.setuptools]
+packages = ["helpers"]
+py-modules = ["trinity_plotting"]

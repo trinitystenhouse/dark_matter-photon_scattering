@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "totani-paper-check"
+version = "0.1.0"
+description = "Totani paper check utilities"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+]
+
+[tool.setuptools]
+packages = ["totani_helpers"]
