@@ -3,6 +3,7 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
+from matplotlib.patches import Rectangle
 from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.coordinates import SkyCoord
@@ -11,6 +12,8 @@ from scipy.ndimage import gaussian_filter
 from totani_helpers.exposure import resample_exposure
 from scipy.optimize import nnls
 from scipy.ndimage import label
+from scipy.spatial import ConvexHull
+from scipy.ndimage import binary_opening, binary_closing, binary_fill_holes
 
 try:
     from skimage.measure import find_contours
@@ -25,6 +28,80 @@ def set_lon_ticks_wrapped(ax, wcs, ny, nx, lons_deg=(-60, -30, 0, 30, 60)):
         xs.append(x)
     ax.set_xticks(xs)
     ax.set_xticklabels([f"{L:d}" for L in lons_deg])
+
+
+def add_fit_box_overlay(ax, *, wcs, lon_max_deg, lat_max_deg, color="y", lw=1.2, alpha=0.9):
+    x1, y1 = wcs.world_to_pixel_values(((-lon_max_deg) % 360.0), -lat_max_deg)
+    x2, y2 = wcs.world_to_pixel_values((( lon_max_deg) % 360.0),  lat_max_deg)
+    x0, x1p = sorted([float(x1), float(x2)])
+    y0, y1p = sorted([float(y1), float(y2)])
+    rect = Rectangle(
+        (x0, y0),
+        (x1p - x0),
+        (y1p - y0),
+        fill=False,
+        edgecolor=color,
+        linewidth=lw,
+        alpha=alpha,
+    )
+    ax.add_patch(rect)
+
+
+def fit_octagon_from_mask(mask_2d, *, n_vertices=8):
+    pts_yx = np.argwhere(mask_2d)
+    if pts_yx.shape[0] < 10:
+        return None
+
+    xy = np.column_stack([pts_yx[:, 1].astype(float), pts_yx[:, 0].astype(float)])
+    try:
+        hull = ConvexHull(xy)
+    except Exception:
+        return None
+
+    hull_xy = xy[hull.vertices]
+    c = np.mean(hull_xy, axis=0)
+    d = hull_xy - c[None, :]
+    ang = np.arctan2(d[:, 1], d[:, 0])
+    r = np.hypot(d[:, 0], d[:, 1])
+
+    edges = np.linspace(-np.pi, np.pi, n_vertices + 1)
+    pick = []
+    for i in range(n_vertices):
+        m = (ang >= edges[i]) & (ang < edges[i + 1])
+        if not np.any(m):
+            continue
+        j = int(np.argmax(r[m]))
+        pick.append(hull_xy[np.where(m)[0][j]])
+
+    if len(pick) < 3:
+        return None
+
+    pick_xy = np.vstack(pick)
+    d2 = pick_xy - np.mean(pick_xy, axis=0)[None, :]
+    ang2 = np.arctan2(d2[:, 1], d2[:, 0])
+    order = np.argsort(ang2)
+    pick_xy = pick_xy[order]
+
+    if pick_xy.shape[0] > n_vertices:
+        pick_xy = pick_xy[:n_vertices]
+    return pick_xy
+
+
+def _disk_structure(radius_pix):
+    r = int(max(1, round(float(radius_pix))))
+    y, x = np.ogrid[-r : r + 1, -r : r + 1]
+    return (x * x + y * y) <= (r * r)
+
+
+def _cleanup_binary_mask(mask_2d, *, r_open_pix, r_close_pix):
+    if not np.any(mask_2d):
+        return mask_2d
+    st_open = _disk_structure(r_open_pix)
+    st_close = _disk_structure(r_close_pix)
+    m = binary_opening(mask_2d, structure=st_open)
+    m = binary_closing(m, structure=st_close)
+    m = binary_fill_holes(m)
+    return m
 # -------------------------
 # Inputs
 # -------------------------
@@ -43,7 +120,10 @@ BINSZ_DEG = 0.125
 PIX_SR = np.deg2rad(BINSZ_DEG) ** 2
 TARGET_GEV = [1500, 4300]  # GeV
 LAT_FIT_MAX_DEG = 50.0
-THR_SIG = .2
+THR_SIG = 0.3
+LON_FIT_MAX_DEG = 20.0
+MORPH_R_OPEN_DEG = 0.75
+MORPH_R_CLOSE_DEG = 1.25
 
 ROI_LON_DEG = 60.0
 ROI_LAT_DEG = 60.0
@@ -302,14 +382,19 @@ marker_r_pix = MARKER_RADIUS_DEG / BINSZ_DEG
 # -------------------------
 sigma_pix = 1 / BINSZ_DEG
 
+sig_by_tgt = {}
+res_by_tgt = {}
+mask_by_tgt = {}
+ccn_by_tgt = {}
+ccs_by_tgt = {}
+
 for itgt, tgt in enumerate(TARGET_GEV):
     k = int(np.argmin(np.abs(Ectr - tgt)))
     print("Energy bin:", k, "Ectr=", Ectr[k])
 
     tgt_gev = tgt / 1000.0
 
-    lat_cut = (np.abs(lat2) <= LAT_FIT_MAX_DEG)
-    mask2d = roi2d & disk_mask & lat_cut & ps_mask[k]
+    mask2d = roi2d & disk_mask & ps_mask[k]
     # mask_all: (nE, ny, nx) True=keep, False=mask
     mask_all = ps_mask & disk_mask[None, :, :] & roi2d[None, :, :]
 
@@ -338,9 +423,18 @@ for itgt, tgt in enumerate(TARGET_GEV):
     sig_s = smooth_nan_2d(sig, sigma_pix=sigma_pix)
     sig_s[~mask2d] = np.nan
 
+    sig_by_tgt[float(tgt)] = sig_s
+    res_by_tgt[float(tgt)] = res_s
+    mask_by_tgt[float(tgt)] = mask2d
+
     above = mask2d & np.isfinite(sig_s) & (sig_s >= THR_SIG)
 
     above_n = above & (lat2 > 0.0)
+    above_n = _cleanup_binary_mask(
+        above_n,
+        r_open_pix=(MORPH_R_OPEN_DEG / BINSZ_DEG),
+        r_close_pix=(MORPH_R_CLOSE_DEG / BINSZ_DEG),
+    )
     lbln, nlabn = label(above_n)
     if nlabn > 0:
         sizes = np.bincount(lbln.ravel())
@@ -351,6 +445,11 @@ for itgt, tgt in enumerate(TARGET_GEV):
         cc_mask_n = np.zeros((ny, nx), dtype=bool)
 
     above_s = above & (lat2 < 0.0)
+    above_s = _cleanup_binary_mask(
+        above_s,
+        r_open_pix=(MORPH_R_OPEN_DEG / BINSZ_DEG),
+        r_close_pix=(MORPH_R_CLOSE_DEG / BINSZ_DEG),
+    )
     lbls, nlabs = label(above_s)
     if nlabs > 0:
         sizes = np.bincount(lbls.ravel())
@@ -361,6 +460,9 @@ for itgt, tgt in enumerate(TARGET_GEV):
         cc_mask_s = np.zeros((ny, nx), dtype=bool)
 
     cc_mask = cc_mask_n | cc_mask_s
+
+    ccn_by_tgt[float(tgt)] = cc_mask_n
+    ccs_by_tgt[float(tgt)] = cc_mask_s
 
     h2 = wcs.to_header()
     out_cc = f"{OUTDIR}/ccmask_residual_{tgt:.1f}MeV_extsrc.fits"
@@ -385,6 +487,8 @@ for itgt, tgt in enumerate(TARGET_GEV):
 
     # ✅ Outline the pixels you actually removed (extended sources + disk cut)
     ax.contour(~mask2d, levels=[0.5], linewidths=0.8, colors="k", alpha=0.8)
+
+    add_fit_box_overlay(ax, wcs=wcs, lon_max_deg=LON_FIT_MAX_DEG, lat_max_deg=LAT_FIT_MAX_DEG, color="y", lw=1.2)
 
     # Largest connected components (north/south) above significance threshold
     ax.contour(cc_mask_n.astype(float), levels=[0.5], linewidths=1.2, colors="c", alpha=0.95)
@@ -422,6 +526,7 @@ for itgt, tgt in enumerate(TARGET_GEV):
     for axx in (ax1, ax2, ax3, ax4):
         set_lon_ticks_wrapped(axx, wcs, ny, nx)
         axx.contour(~mask2d, levels=[0.5], linewidths=0.6, colors="k", alpha=0.7)
+        add_fit_box_overlay(axx, wcs=wcs, lon_max_deg=LON_FIT_MAX_DEG, lat_max_deg=LAT_FIT_MAX_DEG, color="y", lw=1.0, alpha=0.9)
         axx.set_xlabel("l")
         axx.set_ylabel("b")
 
@@ -439,6 +544,219 @@ for itgt, tgt in enumerate(TARGET_GEV):
     plt.savefig(out_m, dpi=200)
     plt.close()
     print("✓ wrote", out_m)
+
+
+if len(TARGET_GEV) >= 2:
+    t1 = float(TARGET_GEV[0])
+    t2 = float(TARGET_GEV[1])
+    if (t1 in sig_by_tgt) and (t2 in sig_by_tgt):
+        w1, w2 = 0.5, 0.5
+        sig_mix = w1 * sig_by_tgt[t1] + w2 * sig_by_tgt[t2]
+        mask_mix = mask_by_tgt[t1] & mask_by_tgt[t2]
+        sig_mix[~mask_mix] = np.nan
+
+        above = mask_mix & np.isfinite(sig_mix) & (sig_mix >= THR_SIG)
+
+        above_n = above & (lat2 > 0.0)
+        lbln, nlabn = label(above_n)
+        if nlabn > 0:
+            sizes = np.bincount(lbln.ravel())
+            sizes[0] = 0
+            keep = int(np.argmax(sizes))
+            cc_n = (lbln == keep)
+        else:
+            cc_n = np.zeros((ny, nx), dtype=bool)
+
+        above_s = above & (lat2 < 0.0)
+        lbls, nlabs = label(above_s)
+        if nlabs > 0:
+            sizes = np.bincount(lbls.ravel())
+            sizes[0] = 0
+            keep = int(np.argmax(sizes))
+            cc_s = (lbls == keep)
+        else:
+            cc_s = np.zeros((ny, nx), dtype=bool)
+
+        cc = cc_n | cc_s
+
+        box_mask = (np.abs(lon_w) <= LON_FIT_MAX_DEG) & (np.abs(lat2) <= LAT_FIT_MAX_DEG) & roi2d
+
+        # Fit octagons based on the 1500 MeV morphology (t1), not the intermediate sig-mix
+        base_cc_n = ccn_by_tgt.get(t1)
+        base_cc_s = ccs_by_tgt.get(t1)
+        if base_cc_n is None or base_cc_s is None:
+            base_cc_n = cc_n
+            base_cc_s = cc_s
+
+        cc_n_in_box = base_cc_n & box_mask
+        cc_s_in_box = base_cc_s & box_mask
+        oct_xy_n = fit_octagon_from_mask(cc_n_in_box, n_vertices=8)
+        oct_xy_s = fit_octagon_from_mask(cc_s_in_box, n_vertices=8)
+
+        h2 = wcs.to_header()
+        fits.writeto(os.path.join(OUTDIR, "ccmask_intermediate_sigmix.fits"), cc.astype(np.int16), header=h2, overwrite=True)
+        fits.writeto(os.path.join(OUTDIR, "ccmask_intermediate_sigmix_north.fits"), cc_n.astype(np.int16), header=h2, overwrite=True)
+        fits.writeto(os.path.join(OUTDIR, "ccmask_intermediate_sigmix_south.fits"), cc_s.astype(np.int16), header=h2, overwrite=True)
+        print("✓ wrote", os.path.join(OUTDIR, "ccmask_intermediate_sigmix.fits"))
+
+        fig = plt.figure(figsize=(12, 4))
+        ax1 = fig.add_subplot(131, projection=wcs)
+        ax2 = fig.add_subplot(132, projection=wcs)
+        ax3 = fig.add_subplot(133, projection=wcs)
+
+        res_ref = res_by_tgt.get(t2, res_by_tgt[t1])
+        im1 = ax1.imshow(res_ref, origin="lower", cmap="RdBu")
+        ax1.contour(cc_n.astype(float), levels=[0.5], colors="c", linewidths=1.2)
+        ax1.contour(cc_s.astype(float), levels=[0.5], colors="m", linewidths=1.2)
+        if oct_xy_n is not None:
+            ax1.plot(
+                np.r_[oct_xy_n[:, 0], oct_xy_n[0, 0]],
+                np.r_[oct_xy_n[:, 1], oct_xy_n[0, 1]],
+                color="c",
+                linewidth=2.0,
+            )
+        if oct_xy_s is not None:
+            ax1.plot(
+                np.r_[oct_xy_s[:, 0], oct_xy_s[0, 0]],
+                np.r_[oct_xy_s[:, 1], oct_xy_s[0, 1]],
+                color="m",
+                linewidth=2.0,
+            )
+
+        im2 = ax2.imshow(sig_mix, origin="lower", cmap="viridis")
+        ax2.contour(cc.astype(float), levels=[0.5], colors="w", linewidths=1.0)
+        if oct_xy_n is not None:
+            ax2.plot(
+                np.r_[oct_xy_n[:, 0], oct_xy_n[0, 0]],
+                np.r_[oct_xy_n[:, 1], oct_xy_n[0, 1]],
+                color="c",
+                linewidth=2.0,
+            )
+        if oct_xy_s is not None:
+            ax2.plot(
+                np.r_[oct_xy_s[:, 0], oct_xy_s[0, 0]],
+                np.r_[oct_xy_s[:, 1], oct_xy_s[0, 1]],
+                color="m",
+                linewidth=2.0,
+            )
+
+        im3 = ax3.imshow(cc.astype(float), origin="lower", vmin=0.0, vmax=1.0, cmap="gray")
+        if oct_xy_n is not None:
+            ax3.plot(
+                np.r_[oct_xy_n[:, 0], oct_xy_n[0, 0]],
+                np.r_[oct_xy_n[:, 1], oct_xy_n[0, 1]],
+                color="c",
+                linewidth=2.0,
+            )
+        if oct_xy_s is not None:
+            ax3.plot(
+                np.r_[oct_xy_s[:, 0], oct_xy_s[0, 0]],
+                np.r_[oct_xy_s[:, 1], oct_xy_s[0, 1]],
+                color="m",
+                linewidth=2.0,
+            )
+
+        for axx in (ax1, ax2, ax3):
+            set_lon_ticks_wrapped(axx, wcs, ny, nx)
+            axx.contour(~mask_mix, levels=[0.5], linewidths=0.6, colors="k", alpha=0.7)
+            add_fit_box_overlay(axx, wcs=wcs, lon_max_deg=LON_FIT_MAX_DEG, lat_max_deg=LAT_FIT_MAX_DEG, color="y", lw=1.0, alpha=0.9)
+
+        ax1.set_title("Intermediate CC overlay (N cyan / S magenta)")
+        ax2.set_title(f"sig_mix = 0.5*sig({t1:.0f}) + 0.5*sig({t2:.0f}), thr={THR_SIG}")
+        ax3.set_title("Intermediate CC mask")
+
+        plt.colorbar(im1, ax=ax1, fraction=0.046)
+        plt.colorbar(im2, ax=ax2, fraction=0.046)
+        plt.tight_layout()
+        out_mix = os.path.join(OUTDIR, "morphology_intermediate_sigmix.png")
+        plt.savefig(out_mix, dpi=200)
+        plt.close()
+        print("✓ wrote", out_mix)
+
+        if oct_xy_n is not None:
+            lon_o, lat_o = wcs.pixel_to_world_values(oct_xy_n[:, 0], oct_xy_n[:, 1])
+            lon_o = ((np.asarray(lon_o) + 180.0) % 360.0) - 180.0
+            lat_o = np.asarray(lat_o)
+            out_oct = os.path.join(OUTDIR, "octagon_vertices_base1500_north.txt")
+            arr = np.column_stack([lon_o, lat_o, oct_xy_n[:, 0], oct_xy_n[:, 1]])
+            np.savetxt(out_oct, arr, header="lon_deg lat_deg x_pix y_pix")
+            print("✓ wrote", out_oct)
+
+        if oct_xy_s is not None:
+            lon_o, lat_o = wcs.pixel_to_world_values(oct_xy_s[:, 0], oct_xy_s[:, 1])
+            lon_o = ((np.asarray(lon_o) + 180.0) % 360.0) - 180.0
+            lat_o = np.asarray(lat_o)
+            out_oct = os.path.join(OUTDIR, "octagon_vertices_base1500_south.txt")
+            arr = np.column_stack([lon_o, lat_o, oct_xy_s[:, 0], oct_xy_s[:, 1]])
+            np.savetxt(out_oct, arr, header="lon_deg lat_deg x_pix y_pix")
+            print("✓ wrote", out_oct)
+
+
+if len(TARGET_GEV) >= 2:
+    t1 = float(TARGET_GEV[0])
+    t2 = float(TARGET_GEV[1])
+    if (t1 in res_by_tgt) and (t2 in res_by_tgt) and (t1 in ccn_by_tgt) and (t1 in ccs_by_tgt):
+        box_mask = (np.abs(lon_w) <= LON_FIT_MAX_DEG) & (np.abs(lat2) <= LAT_FIT_MAX_DEG) & roi2d
+        oct_xy_n = fit_octagon_from_mask(ccn_by_tgt[t1] & box_mask, n_vertices=8)
+        oct_xy_s = fit_octagon_from_mask(ccs_by_tgt[t1] & box_mask, n_vertices=8)
+
+        disk_band_2d = (~disk_mask) & roi2d
+
+        fig = plt.figure(figsize=(10.5, 4.0))
+        axL = fig.add_subplot(121, projection=wcs)
+        axR = fig.add_subplot(122, projection=wcs)
+
+        resL = res_by_tgt[t1]
+        resR = res_by_tgt[t2]
+
+        vminL, vmaxL = -5e-10, 5e-10
+        vminR, vmaxR = -5e-11, 5e-11
+
+        imL = axL.imshow(resL, origin="lower", vmin=vminL, vmax=vmaxL, cmap="RdBu")
+        imR = axR.imshow(resR, origin="lower", vmin=vminR, vmax=vmaxR, cmap="RdBu")
+
+        for axx, title in ((axL, "1.5 GeV"), (axR, "4.3 GeV")):
+            axx.imshow(
+                np.where(disk_band_2d, 1.0, np.nan),
+                origin="lower",
+                cmap="gray",
+                vmin=0.0,
+                vmax=1.0,
+                alpha=0.85,
+                interpolation="nearest",
+            )
+            set_lon_ticks_wrapped(axx, wcs, ny, nx)
+            axx.set_xlabel(r"longitude $l$ [deg]")
+            axx.set_ylabel(r"latitude $b$ [deg]")
+            axx.text(0.03, 0.95, title, transform=axx.transAxes, color="w", ha="left", va="top", fontsize=12)
+
+            if oct_xy_n is not None:
+                axx.plot(
+                    np.r_[oct_xy_n[:, 0], oct_xy_n[0, 0]],
+                    np.r_[oct_xy_n[:, 1], oct_xy_n[0, 1]],
+                    color="w",
+                    linewidth=1.4,
+                    alpha=0.95,
+                )
+            if oct_xy_s is not None:
+                axx.plot(
+                    np.r_[oct_xy_s[:, 0], oct_xy_s[0, 0]],
+                    np.r_[oct_xy_s[:, 1], oct_xy_s[0, 1]],
+                    color="w",
+                    linewidth=1.4,
+                    alpha=0.95,
+                )
+
+        cbarL = fig.colorbar(imL, ax=axL, orientation="horizontal", pad=0.02, fraction=0.08, location="top")
+        cbarL.set_label(r"flux  [cm$^{-2}$ s$^{-1}$ sr$^{-1}$ MeV$^{-1}$]")
+        cbarR = fig.colorbar(imR, ax=axR, orientation="horizontal", pad=0.02, fraction=0.08, location="top")
+        cbarR.set_label(r"flux  [cm$^{-2}$ s$^{-1}$ sr$^{-1}$ MeV$^{-1}$]")
+
+        plt.tight_layout()
+        out_ref = os.path.join(OUTDIR, "morphology_reference_style.png")
+        plt.savefig(out_ref, dpi=200)
+        plt.close()
+        print("✓ wrote", out_ref)
 
 
 print("✓ Done:", OUTDIR)
