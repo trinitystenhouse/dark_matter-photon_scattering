@@ -118,7 +118,15 @@ Ectr_mev = Ectr_kev / 1000.0
 dE_mev   = (Emax_mev - Emin_mev)
 
 nE = len(Ectr_mev)
-print("[E] Bin centers (MeV):", np.round(Ectr_mev, 3))
+print("[E] counts EBOUNDS:")
+print("[E]   Emin_keV:", np.round(Emin_kev, 3))
+print("[E]   Emax_keV:", np.round(Emax_kev, 3))
+print("[E]   Ectr_keV:", np.round(Ectr_kev, 3))
+print("[E]   Emin_MeV:", np.round(Emin_mev, 6))
+print("[E]   Emax_MeV:", np.round(Emax_mev, 6))
+print("[E]   Ectr_MeV:", np.round(Ectr_mev, 6))
+print("[E]   Ectr_GeV:", np.round(Ectr_mev / 1000.0, 6))
+print("[E]   dE_MeV  :", np.round(dE_mev, 6))
 
 # Solid angle map
 omega = pixel_solid_angle_map(wcs, ny, nx, BINSZ_DEG)
@@ -133,11 +141,20 @@ with fits.open(EXPO) as h:
     if "ENERGIES" in h:
         col0 = h["ENERGIES"].columns.names[0]
         E_expo_mev = np.array(h["ENERGIES"].data[col0], dtype=float)
-        print(E_expo_mev)
+        print("[E] expcube ENERGIES (as stored, assumed MeV):")
+        print("[E]   N:", int(E_expo_mev.size))
+        print("[E]   min/max:", float(np.nanmin(E_expo_mev)), float(np.nanmax(E_expo_mev)))
+        print("[E]   first/last:", float(E_expo_mev[0]), float(E_expo_mev[-1]))
+    else:
+        print("[E] expcube has no ENERGIES extension")
+
+print("[E] expcube planes (raw):", expo_raw.shape)
 
 expo = resample_exposure_logE(expo_raw, E_expo_mev, Ectr_mev)
 if expo.shape != (nE, ny, nx):
     raise RuntimeError(f"Exposure shape {expo.shape} not compatible with {(nE, ny, nx)}")
+
+print("[E] expcube planes (resampled):", expo.shape)
 
 
 # --------------------------------------------------
@@ -194,33 +211,42 @@ for src in psc:
 
 
 # --------------------------------------------------
-# PSF smoothing (energy-dependent), conserving integrated flux per bin
+# Convert integrated flux to expected counts per bin per pixel:
+#   mu_ps_raw = Φ_bin * exposure
+# Units: counts
+# --------------------------------------------------
+mu_ps = phi_bin_map * expo
+
+
+# --------------------------------------------------
+# PSF smoothing (energy-dependent), conserving total counts per bin
 # --------------------------------------------------
 for k in range(nE):
-    sigma_pix = psf_sigma_deg(Ectr_mev[k]) / BINSZ_DEG
+    sigma_pix = psf_sigma_deg(Ectr_mev[k] / 1000.0) / BINSZ_DEG
     if sigma_pix <= 0:
         continue
-    before = np.nansum(phi_bin_map[k])
-    phi_bin_map[k] = gaussian_filter(phi_bin_map[k], sigma=sigma_pix, mode="constant", cval=0.0)
-    after = np.nansum(phi_bin_map[k])
+    before = np.nansum(mu_ps[k])
+    mu_ps[k] = gaussian_filter(mu_ps[k], sigma=sigma_pix, mode="constant", cval=0.0)
+    after = np.nansum(mu_ps[k])
     if after > 0 and np.isfinite(before):
-        phi_bin_map[k] *= (before / after)
+        mu_ps[k] *= (before / after)
 
 
 # --------------------------------------------------
 # Convert to dN/dE (intensity):
-#   dnde = Φ_bin / (Ω_pix * ΔE)
+#   dnde = mu_ps / (exposure * Ω_pix * ΔE)
 # Units: ph cm^-2 s^-1 sr^-1 MeV^-1
 # --------------------------------------------------
-dnde = (phi_bin_map / omega[None, :, :]) / dE_mev[:, None, None]
+dnde = np.full_like(mu_ps, np.nan, dtype=float)
+denom = expo * omega[None, :, :] * dE_mev[:, None, None]
+good = np.isfinite(denom) & (denom > 0) & np.isfinite(mu_ps)
+dnde[good] = mu_ps[good] / denom[good]
 
 # Totani y-axis cube: E^2 dN/dE
 # Units: MeV cm^-2 s^-1 sr^-1
 E2dnde = dnde * (Ectr_mev[:, None, None] ** 2)
 
-# Counts template:
-#   mu = dnde * exposure * Ω_pix * ΔE  (=> counts)
-mu_ps = dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
+# mu_ps already computed above in counts-space and PSF-smoothed.
 
 
 # --------------------------------------------------
