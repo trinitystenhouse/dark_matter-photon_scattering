@@ -247,6 +247,12 @@ def fit_per_bin_weighted_nnls(counts, mu_list, mask3d):
 
         X = np.vstack([mu[k][m].ravel() for mu in mu_list]).T  # (Np, ncomp)
 
+        good = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
+        y = y[good]
+        X = X[good]
+        if y.size == 0:
+            continue
+
         # Poisson-ish weights: downweight noisy high-count pixels slightly
         w = 1.0 / np.maximum(y, 1.0)
         sw = np.sqrt(w)
@@ -294,6 +300,12 @@ def fit_per_bin_weighted_nnls_cellwise(counts, mu_list, mask3d, lon, lat, roi_lo
 
             X = np.vstack([mu[k][m2d].ravel() for mu in mu_list]).T
 
+            good = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
+            y = y[good]
+            X = X[good]
+            if y.size == 0:
+                continue
+
             if weighting == "uniform":
                 Xw = X
                 yw = y
@@ -333,13 +345,14 @@ def resolve_templates(template_dir):
     """
     spec = {}
 
-    spec["IEM"] = pick_existing(template_dir, [
-        "mu_iem_counts.fits",
-        "mu_iem.fits",
-        "mu_iem_counts.fits.gz",
-        "template_iem_intensity.fits",
-        "iem_dnde.fits",
-        "iem_E2dnde.fits",
+    spec["GAS"] = pick_existing(template_dir, [
+        "mu_gas_counts.fits",
+        "gas_dnde.fits",
+    ])
+
+    spec["ICS"] = pick_existing(template_dir, [
+        "mu_ics_counts.fits",
+        "ics_dnde.fits",
     ])
 
     spec["ISO"] = pick_existing(template_dir, [
@@ -395,7 +408,7 @@ def resolve_templates(template_dir):
         raise RuntimeError(
             "Missing templates for: " + ", ".join(missing) +
             f"\nLooked in: {template_dir}\n"
-            "Expected files like mu_iem_counts.fits, mu_iso_counts.fits, mu_ps_counts.fits, mu_nfw_counts.fits, "
+            "Expected files like mu_gas_counts.fits, mu_ics_counts.fits, mu_iso_counts.fits, mu_ps_counts.fits, mu_nfw_counts.fits, "
             "mu_loopI_counts.fits, mu_bubbles_flat_counts.fits"
         )
     return spec
@@ -541,7 +554,7 @@ def main():
 
     # Resolve templates automatically
     tpl = resolve_templates(args.templates_dir)
-    labels = ["IEM", "ISO", "PS", "LOOPI", "FB_FLAT", "NFW"]
+    labels = ["GAS", "ICS", "ISO", "PS", "LOOPI", "FB_FLAT", "NFW"]
 
     # Load templates -> mu + E2 maps ONCE
     mu_list = []
