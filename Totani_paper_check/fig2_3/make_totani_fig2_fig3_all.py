@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 import os
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.io import fits
 from astropy.wcs import WCS
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from totani_helpers.totani_io import (
+    lonlat_grids,
+    pixel_solid_angle_map,
+    read_counts_and_ebounds,
+    read_exposure,
+    resample_exposure_logE,
+)
 
 REPO_DIR = os.environ["REPO_PATH"]
 DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
@@ -14,79 +24,6 @@ try:
     HAVE_NNLS = True
 except Exception:
     HAVE_NNLS = False
-
-
-# -------------------------
-# IO + geometry helpers
-# -------------------------
-def read_counts_and_ebounds(counts_path):
-    with fits.open(counts_path) as h:
-        counts = h[0].data.astype(float)   # (nE, ny, nx)
-        hdr = h[0].header
-        eb  = h["EBOUNDS"].data
-
-    Emin = eb["E_MIN"].astype(float) / 1000 # MeV
-    Emax = eb["E_MAX"].astype(float) / 1000 # MeV
-    Ectr = np.sqrt(Emin * Emax)       # MeV
-    dE   = (Emax - Emin)              # MeV
-    return counts, hdr, Emin, Emax, Ectr, dE
-
-
-def read_exposure(expo_path):
-    with fits.open(expo_path) as h:
-        expo_raw = h[0].data.astype(float)  # (Ne, ny, nx)
-        E_expo = None
-        if "ENERGIES" in h:
-            col0 = h["ENERGIES"].columns.names[0]
-            E_expo = np.array(h["ENERGIES"].data[col0], dtype=float)  # MeV
-    return expo_raw, E_expo
-
-
-def resample_exposure_logE(expo_raw, E_expo_mev, E_tgt_mev):
-    """Log-energy linear interpolation onto target energies."""
-    if expo_raw.shape[0] == len(E_tgt_mev):
-        return expo_raw
-    if E_expo_mev is None:
-        raise RuntimeError("Exposure planes != counts planes and EXPO has no ENERGIES table.")
-
-    order = np.argsort(E_expo_mev)
-    E_expo_mev = E_expo_mev[order]
-    expo_raw = expo_raw[order]
-
-    logEs = np.log(E_expo_mev)
-    logEt = np.log(E_tgt_mev)
-
-    ne, ny, nx = expo_raw.shape
-    flat = expo_raw.reshape(ne, ny * nx)
-
-    idx = np.searchsorted(logEs, logEt)
-    idx = np.clip(idx, 1, ne - 1)
-    i0 = idx - 1
-    i1 = idx
-    w = (logEt - logEs[i0]) / (logEs[i1] - logEs[i0])
-
-    out = np.empty((len(E_tgt_mev), ny * nx), float)
-    for j in range(len(E_tgt_mev)):
-        out[j] = (1 - w[j]) * flat[i0[j]] + w[j] * flat[i1[j]]
-    return out.reshape(len(E_tgt_mev), ny, nx)
-
-
-def pixel_solid_angle_map(wcs, ny, nx, binsz_deg):
-    """Ω_pix ≈ Δl Δb cos(b) for CAR (matches your template convention)."""
-    dl = np.deg2rad(binsz_deg)
-    db = np.deg2rad(binsz_deg)
-    y = np.arange(ny)
-    x_mid = np.full(ny, (nx - 1) / 2.0)
-    _, b_deg = wcs.pixel_to_world_values(x_mid, y)
-    omega_row = dl * db * np.cos(np.deg2rad(b_deg))
-    return omega_row[:, None] * np.ones((1, nx), float)  # sr
-
-
-def lonlat_grids(wcs, ny, nx):
-    yy, xx = np.mgrid[:ny, :nx]
-    lon, lat = wcs.pixel_to_world_values(xx, yy)
-    lon = ((lon + 180) % 360) - 180
-    return lon, lat
 
 
 def build_roi_box_mask(lon, lat, roi_lon=60.0, roi_lat=60.0):
@@ -398,9 +335,9 @@ def resolve_templates(template_dir):
     ])
 
     spec["FB_FLAT"] = pick_existing(template_dir, [
-        "mu_bubbles_flat_counts.fits",
-        "bubbles_flat_dnde.fits",
-        "bubbles_flat_E2dnde.fits",
+        "mu_bubbles_userpoly_full_counts.fits",
+        "bubbles_userpoly_full_dnde.fits",
+        "bubbles_userpoly_full_E2dnde.fits",
     ])
 
     missing = [k for k, v in spec.items() if v is None]

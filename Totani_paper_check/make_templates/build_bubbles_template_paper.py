@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import sys
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -12,26 +13,11 @@ from scipy.special import sph_harm
 from scipy.ndimage import gaussian_filter, label
 from scipy.optimize import nnls
 
-def smooth_nan_2d(img, *, sigma_pix):
-    x = np.asarray(img, dtype=float)
-    good = np.isfinite(x)
-    if not np.any(good):
-        return np.full_like(x, np.nan, dtype=float)
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from totani_helpers.totani_io import *
 
-    x0 = np.zeros_like(x, dtype=float)
-    x0[good] = x[good]
-    w = np.zeros_like(x, dtype=float)
-    w[good] = 1.0
-
-    xs = gaussian_filter(x0, float(sigma_pix), mode="constant", cval=0.0)
-    ws = gaussian_filter(w, float(sigma_pix), mode="constant", cval=0.0)
-
-    out = np.full_like(x, np.nan, dtype=float)
-    m = ws > 0
-    out[m] = xs[m] / ws[m]
-    return out
-
-
+REPO_DIR = os.environ["REPO_PATH"]
+DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
 
 def fit_bin_weighted_nnls(
     counts_2d,
@@ -94,16 +80,22 @@ def plot_subtraction_diagnostics(
     expo_k,
     omega,
     dE_mev_k,
-    components_scaled,   # dict: name -> 2D map in counts space
-    model_counts,
-    resid_counts,
+    trusted_components_scaled,
+    smooth_model_counts,
+    trusted_model_counts,
+    all_model_counts,
+    resid_after_trusted_counts,
+    resid_after_all_counts,
     binsz_deg,
     resid_plot_smooth_deg=1.0,
 ):
     denom = expo_k * omega * dE_mev_k  # cm^2 s sr MeV
-    resid_flux = np.full_like(resid_counts, np.nan, dtype=float)
+
+    resid_flux_tr = np.full_like(resid_after_trusted_counts, np.nan, dtype=float)
+    resid_flux_all = np.full_like(resid_after_all_counts, np.nan, dtype=float)
     good = roi2d & np.isfinite(denom) & (denom > 0)
-    resid_flux[good] = resid_counts[good] / denom[good]
+    resid_flux_tr[good] = resid_after_trusted_counts[good] / denom[good]
+    resid_flux_all[good] = resid_after_all_counts[good] / denom[good]
 
     # Mask outside ROI
     def _mask(x):
@@ -138,17 +130,23 @@ def plot_subtraction_diagnostics(
 
     # Build panels with a "kind" tag to control scaling
     panels = [("Data (counts)", _mask(counts_k), "counts")]
-    for name, m in components_scaled.items():
+    for name, m in trusted_components_scaled.items():
         panels.append((f"{name} (scaled, counts)", _mask(m), "counts"))
 
     sigma_pix = float(resid_plot_smooth_deg) / float(binsz_deg)
-    resid_counts_sm = smooth_nan_2d(_mask(resid_counts), sigma_pix=sigma_pix)
-    resid_flux_sm = smooth_nan_2d(_mask(resid_flux), sigma_pix=sigma_pix)
+    resid_tr_counts_sm = smooth_nan_2d(_mask(resid_after_trusted_counts), sigma_pix=sigma_pix)
+    resid_all_counts_sm = smooth_nan_2d(_mask(resid_after_all_counts), sigma_pix=sigma_pix)
+    resid_tr_flux_sm = smooth_nan_2d(_mask(resid_flux_tr), sigma_pix=sigma_pix)
+    resid_all_flux_sm = smooth_nan_2d(_mask(resid_flux_all), sigma_pix=sigma_pix)
 
     panels += [
-        ("Total model to subtract (counts)", _mask(model_counts), "counts"),
-        (f"Residual (counts), σ={float(resid_plot_smooth_deg):.1f}°", resid_counts_sm, "resid"),
-        (f"Residual flux = resid/(expo*Ω*ΔE), σ={float(resid_plot_smooth_deg):.1f}°", resid_flux_sm, "resid"),
+        ("Smooth model (counts)", _mask(smooth_model_counts), "counts"),
+        ("Trusted model to subtract (counts)", _mask(trusted_model_counts), "counts"),
+        ("All model = trusted + smooth (counts)", _mask(all_model_counts), "counts"),
+        (f"Residual after trusted (counts), σ={float(resid_plot_smooth_deg):.1f}°", resid_tr_counts_sm, "resid"),
+        (f"Residual after all (counts), σ={float(resid_plot_smooth_deg):.1f}°", resid_all_counts_sm, "resid"),
+        (f"Residual flux after trusted, σ={float(resid_plot_smooth_deg):.1f}°", resid_tr_flux_sm, "resid"),
+        (f"Residual flux after all, σ={float(resid_plot_smooth_deg):.1f}°", resid_all_flux_sm, "resid"),
     ]
 
     n = len(panels)
@@ -196,16 +194,21 @@ def plot_subtraction_diagnostics_masked(
     expo_k,
     omega,
     dE_mev_k,
-    components_scaled,
-    model_counts,
-    resid_counts,
+    trusted_components_scaled,
+    smooth_model_counts,
+    trusted_model_counts,
+    all_model_counts,
+    resid_after_trusted_counts,
+    resid_after_all_counts,
     binsz_deg,
     resid_plot_smooth_deg=1.0,
 ):
     denom = expo_k * omega * dE_mev_k  # cm^2 s sr MeV
-    resid_flux = np.full_like(resid_counts, np.nan, dtype=float)
+    resid_flux_tr = np.full_like(resid_after_trusted_counts, np.nan, dtype=float)
+    resid_flux_all = np.full_like(resid_after_all_counts, np.nan, dtype=float)
     good = good_mask2d & np.isfinite(denom) & (denom > 0)
-    resid_flux[good] = resid_counts[good] / denom[good]
+    resid_flux_tr[good] = resid_after_trusted_counts[good] / denom[good]
+    resid_flux_all[good] = resid_after_all_counts[good] / denom[good]
 
     def _mask(x):
         y = np.array(x, dtype=float, copy=True)
@@ -236,17 +239,23 @@ def plot_subtraction_diagnostics_masked(
         return max(float(lim), floor)
 
     panels = [("Data (counts)", _mask(counts_k), "counts")]
-    for name, m in components_scaled.items():
+    for name, m in trusted_components_scaled.items():
         panels.append((f"{name} (scaled, counts)", _mask(m), "counts"))
 
     sigma_pix = float(resid_plot_smooth_deg) / float(binsz_deg)
-    resid_counts_sm = smooth_nan_2d(_mask(resid_counts), sigma_pix=sigma_pix)
-    resid_flux_sm = smooth_nan_2d(_mask(resid_flux), sigma_pix=sigma_pix)
+    resid_tr_counts_sm = smooth_nan_2d(_mask(resid_after_trusted_counts), sigma_pix=sigma_pix)
+    resid_all_counts_sm = smooth_nan_2d(_mask(resid_after_all_counts), sigma_pix=sigma_pix)
+    resid_tr_flux_sm = smooth_nan_2d(_mask(resid_flux_tr), sigma_pix=sigma_pix)
+    resid_all_flux_sm = smooth_nan_2d(_mask(resid_flux_all), sigma_pix=sigma_pix)
 
     panels += [
-        ("Total model to subtract (counts)", _mask(model_counts), "counts"),
-        (f"Residual (counts), σ={float(resid_plot_smooth_deg):.1f}°", resid_counts_sm, "resid"),
-        (f"Residual flux = resid/(expo*Ω*ΔE), σ={float(resid_plot_smooth_deg):.1f}°", resid_flux_sm, "resid"),
+        ("Smooth model (counts)", _mask(smooth_model_counts), "counts"),
+        ("Trusted model to subtract (counts)", _mask(trusted_model_counts), "counts"),
+        ("All model = trusted + smooth (counts)", _mask(all_model_counts), "counts"),
+        (f"Residual after trusted (counts), σ={float(resid_plot_smooth_deg):.1f}°", resid_tr_counts_sm, "resid"),
+        (f"Residual after all (counts), σ={float(resid_plot_smooth_deg):.1f}°", resid_all_counts_sm, "resid"),
+        (f"Residual flux after trusted, σ={float(resid_plot_smooth_deg):.1f}°", resid_tr_flux_sm, "resid"),
+        (f"Residual flux after all, σ={float(resid_plot_smooth_deg):.1f}°", resid_all_flux_sm, "resid"),
     ]
 
     n = len(panels)
@@ -310,7 +319,7 @@ def _fit_two_powerlaws_weighted(y, sigma, f1, f2):
     return H, S, sigma_H
 
 
-def _read_vertices_lonlat(path):
+def read_vertices_lonlat(path):
     pts = []
     with open(path, "r") as f:
         for line in f:
@@ -344,7 +353,7 @@ def _write_primary_with_bunit(path, data, hdr_in, bunit):
     fits.PrimaryHDU(data=data, header=hdr).writeto(path, overwrite=True)
 
 
-def _write_template_products(*, outdir, prefix, wcs, roi2d, mask2d, expo, omega, dE_mev, Ectr_mev):
+def _write_template_products(*, outdir_data, prefix, wcs, roi2d, mask2d, expo, omega, dE_mev, Ectr_mev):
     nE, ny, nx = expo.shape
     if mask2d.shape != (ny, nx):
         raise RuntimeError("mask2d shape mismatch")
@@ -371,79 +380,11 @@ def _write_template_products(*, outdir, prefix, wcs, roi2d, mask2d, expo, omega,
     mu_counts = dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
 
     hdr2 = wcs.to_header()
-    _write_primary_with_bunit(os.path.join(outdir, f"{prefix}_mask.fits"), mask2d.astype(np.int16), hdr2, "dimensionless")
-    _write_primary_with_bunit(os.path.join(outdir, f"{prefix}_template.fits"), T.astype(np.float32), hdr2, "dimensionless")
-    _write_primary_with_bunit(os.path.join(outdir, f"mu_{prefix}_counts.fits"), mu_counts.astype(np.float32), hdr2, "counts")
-    _write_primary_with_bunit(os.path.join(outdir, f"{prefix}_dnde.fits"), dnde.astype(np.float32), hdr2, "ph cm-2 s-1 sr-1 MeV-1")
-    _write_primary_with_bunit(os.path.join(outdir, f"{prefix}_E2dnde.fits"), e2dnde.astype(np.float32), hdr2, "MeV cm-2 s-1 sr-1")
-
-
-def _read_counts_and_ebounds(counts_path):
-    with fits.open(counts_path) as h:
-        counts = h[0].data.astype(float)
-        hdr = h[0].header
-        eb = h["EBOUNDS"].data
-
-    Emin = eb["E_MIN"].astype(float) / 1000.0
-    Emax = eb["E_MAX"].astype(float) / 1000.0
-    Ectr = np.sqrt(Emin * Emax)
-    dE = (Emax - Emin)
-    return counts, hdr, Emin, Emax, Ectr, dE
-
-
-def _read_exposure(expo_path):
-    with fits.open(expo_path) as h:
-        expo = h[0].data.astype(float)
-        E_expo = None
-        if "ENERGIES" in h:
-            col0 = h["ENERGIES"].columns.names[0]
-            E_expo = np.array(h["ENERGIES"].data[col0], dtype=float)
-    return expo, E_expo
-
-
-def _resample_exposure_logE(expo_raw, E_expo_mev, E_tgt_mev):
-    if expo_raw.shape[0] == len(E_tgt_mev):
-        return expo_raw
-    if E_expo_mev is None:
-        raise RuntimeError("Exposure planes != counts planes and EXPO has no ENERGIES table.")
-
-    order = np.argsort(E_expo_mev)
-    E_expo_mev = E_expo_mev[order]
-    expo_raw = expo_raw[order]
-
-    logEs = np.log(E_expo_mev)
-    logEt = np.log(E_tgt_mev)
-
-    ne, ny, nx = expo_raw.shape
-    flat = expo_raw.reshape(ne, ny * nx)
-
-    idx = np.searchsorted(logEs, logEt)
-    idx = np.clip(idx, 1, ne - 1)
-    i0 = idx - 1
-    i1 = idx
-    w = (logEt - logEs[i0]) / (logEs[i1] - logEs[i0])
-
-    out = np.empty((len(E_tgt_mev), ny * nx), float)
-    for j in range(len(E_tgt_mev)):
-        out[j] = (1 - w[j]) * flat[i0[j]] + w[j] * flat[i1[j]]
-    return out.reshape(len(E_tgt_mev), ny, nx)
-
-
-def _pixel_solid_angle_map(wcs, ny, nx, binsz_deg):
-    dl = np.deg2rad(binsz_deg)
-    db = np.deg2rad(binsz_deg)
-    y = np.arange(ny)
-    x_mid = np.full(ny, (nx - 1) / 2.0)
-    _, b_deg = wcs.pixel_to_world_values(x_mid, y)
-    omega_row = dl * db * np.cos(np.deg2rad(b_deg))
-    return omega_row[:, None] * np.ones((1, nx), float)
-
-
-def _lonlat_grids(wcs, ny, nx):
-    yy, xx = np.mgrid[:ny, :nx]
-    lon, lat = wcs.pixel_to_world_values(xx, yy)
-    lon = ((lon + 180.0) % 360.0) - 180.0
-    return lon, lat
+    _write_primary_with_bunit(os.path.join(outdir_data, f"{prefix}_mask.fits"), mask2d.astype(np.int16), hdr2, "dimensionless")
+    _write_primary_with_bunit(os.path.join(outdir_data, f"{prefix}_template.fits"), T.astype(np.float32), hdr2, "dimensionless")
+    _write_primary_with_bunit(os.path.join(outdir_data, f"mu_{prefix}_counts.fits"), mu_counts.astype(np.float32), hdr2, "counts")
+    _write_primary_with_bunit(os.path.join(outdir_data, f"{prefix}_dnde.fits"), dnde.astype(np.float32), hdr2, "ph cm-2 s-1 sr-1 MeV-1")
+    _write_primary_with_bunit(os.path.join(outdir_data, f"{prefix}_E2dnde.fits"), e2dnde.astype(np.float32), hdr2, "MeV cm-2 s-1 sr-1")
 
 
 def _roi_box_mask(lon, lat, roi_lon, roi_lat):
@@ -461,31 +402,24 @@ def _load_mask_any_shape(mask_path, counts_shape):
 
 
 def _stage_load_inputs(args):
-    repo_dir = os.environ["REPO_PATH"]
-    data_dir = os.path.join(repo_dir, "fermi_data", "totani")
+    os.makedirs(args.outdir_plots, exist_ok=True)
 
-    counts_path = args.counts or os.path.join(data_dir, "processed", "counts_ccube_1000to1000000.fits")
-    expo_path = args.expo or os.path.join(data_dir, "processed", "expcube_1000to1000000.fits")
-    templates_dir = args.templates_dir or os.path.join(data_dir, "processed", "templates")
-
-    os.makedirs(args.outdir, exist_ok=True)
-
-    counts, hdr, Emin, Emax, Ectr_mev, dE_mev = _read_counts_and_ebounds(counts_path)
+    counts, hdr, Emin, Emax, Ectr_mev, dE_mev = read_counts_and_ebounds(args.counts)
     nE, ny, nx = counts.shape
     wcs = WCS(hdr).celestial
 
-    expo_raw, E_expo = _read_exposure(expo_path)
-    expo = _resample_exposure_logE(expo_raw, E_expo, Ectr_mev)
+    expo_raw, E_expo = read_exposure(args.expcube)
+    expo = resample_exposure_logE(expo_raw, E_expo, Ectr_mev)
     if expo.shape != (nE, ny, nx):
         raise RuntimeError("Exposure shape mismatch after resampling")
 
-    omega = _pixel_solid_angle_map(wcs, ny, nx, args.binsz)
-    lon, lat = _lonlat_grids(wcs, ny, nx)
+    omega = pixel_solid_angle_map(wcs, ny, nx, args.binsz)
+    lon, lat = lonlat_grids(wcs, ny, nx)
     roi2d = _roi_box_mask(lon, lat, args.roi_lon, args.roi_lat)
 
     return {
-        "data_dir": data_dir,
-        "templates_dir": templates_dir,
+        "data_dir": DATA_DIR,
+        "templates_dir": args.templates_dir,
         "counts": counts,
         "expo": expo,
         "hdr": hdr,
@@ -501,13 +435,13 @@ def _stage_load_inputs(args):
 
 def _stage_apply_keep_masks(*, args, counts, expo, roi2d, templates_dir):
     if args.ext_mask:
-        ext_keep3d = _load_mask_any_shape(args.ext_mask, counts.shape)
+        ext_keep3d = load_mask_any_shape(args.ext_mask, counts.shape)
     else:
         default_ext = os.path.join(templates_dir, "mask_extended_sources.fits")
-        ext_keep3d = _load_mask_any_shape(default_ext, counts.shape) if os.path.exists(default_ext) else np.ones_like(counts, bool)
+        ext_keep3d = load_mask_any_shape(default_ext, counts.shape) if os.path.exists(default_ext) else np.ones_like(counts, bool)
 
     if args.ps_mask:
-        ps_keep3d = _load_mask_any_shape(args.ps_mask, counts.shape)
+        ps_keep3d = load_mask_any_shape(args.ps_mask, counts.shape)
     else:
         ps_keep3d = np.ones_like(counts, bool)
 
@@ -535,16 +469,29 @@ def _stage_load_mu_templates(*, templates_dir, mask_all, counts_shape):
     return mu_gas_m, mu_ps_m
 
 
+def _stage_load_optional_mu_template(*, templates_dir, name, mask_all, counts_shape):
+    path = os.path.join(templates_dir, f"mu_{name}_counts.fits")
+    if not os.path.exists(path):
+        raise RuntimeError(f"Requested mu_{name}_counts.fits but file not found: {path}")
+    with fits.open(path) as h:
+        mu = h[0].data.astype(float)
+    if mu.shape != counts_shape:
+        raise RuntimeError(f"mu_{name} shape mismatch")
+    mu_m = np.array(mu, copy=True)
+    mu_m[~mask_all] = np.nan
+    return mu_m
+
+
 def _stage_optional_user_polygon(*, args, wcs, ny, nx, connected_mask):
     if (args.user_mask_north_verts is None) and (args.user_mask_south_verts is None):
         return connected_mask
 
     user_mask = np.zeros((ny, nx), dtype=bool)
     if args.user_mask_north_verts is not None:
-        vN = _read_vertices_lonlat(args.user_mask_north_verts)
+        vN = read_vertices_lonlat(args.user_mask_north_verts)
         user_mask |= _polygon_mask_from_lonlat_vertices(wcs, ny, nx, vN)
     if args.user_mask_south_verts is not None:
-        vS = _read_vertices_lonlat(args.user_mask_south_verts)
+        vS = read_vertices_lonlat(args.user_mask_south_verts)
         user_mask |= _polygon_mask_from_lonlat_vertices(wcs, ny, nx, vS)
     return user_mask
 
@@ -561,7 +508,7 @@ def _stage_write_products(*, args, wcs, roi2d, lat, connected_mask, expo, omega,
             print(f"[products] Skip {suffix}: empty mask within ROI")
             return
         _write_template_products(
-            outdir=args.outdir,
+            outdir_data=args.outdir_data,
             prefix=f"{args.products_prefix}_{suffix}",
             wcs=wcs,
             roi2d=roi2d,
@@ -580,9 +527,9 @@ def _stage_write_products(*, args, wcs, roi2d, lat, connected_mask, expo, omega,
 
 def _stage_write_debug_maps(*, args, wcs, sig_sm, Hmap, Smap):
     h2 = wcs.to_header()
-    fits.writeto(os.path.join(args.outdir, "debug_sca_hard_sig_smoothed.fits"), sig_sm.astype(np.float32), header=h2, overwrite=True)
-    fits.writeto(os.path.join(args.outdir, "debug_sca_hard_map.fits"), Hmap.astype(np.float32), header=h2, overwrite=True)
-    fits.writeto(os.path.join(args.outdir, "debug_sca_soft_map.fits"), Smap.astype(np.float32), header=h2, overwrite=True)
+    fits.writeto(os.path.join(args.outdir_data, "debug_sca_hard_sig_smoothed.fits"), sig_sm.astype(np.float32), header=h2, overwrite=True)
+    fits.writeto(os.path.join(args.outdir_data, "debug_sca_hard_map.fits"), Hmap.astype(np.float32), header=h2, overwrite=True)
+    fits.writeto(os.path.join(args.outdir_data, "debug_sca_soft_map.fits"), Smap.astype(np.float32), header=h2, overwrite=True)
 
 
 def _stage_plot_sca_summary(*, args, wcs, roi2d, sig_sm, Hmap, Smap, full_mask):
@@ -626,7 +573,7 @@ def _stage_plot_sca_summary(*, args, wcs, roi2d, sig_sm, Hmap, Smap, full_mask):
     ax4.set_ylabel("b")
 
     plt.tight_layout()
-    plt.savefig(os.path.join(args.outdir, "sca_summary.png"), dpi=200)
+    plt.savefig(os.path.join(args.outdir_plots, "sca_summary.png"), dpi=200)
     plt.close()
 
 
@@ -643,6 +590,7 @@ def derive_bubbles_mask_sca(
     mu_ics,
     mu_iso,
     mu_ps,
+    mu_loopi,
     roi2d,
     binsz_deg,
     e_min_gev=1.0,
@@ -656,7 +604,8 @@ def derive_bubbles_mask_sca(
     sca_domain_lat_min=10.0,
     hilat_cut_deg=10.0,
     clip_counts_pctl=99.9,
-    outdir=None,
+    outdir_plots=None,
+    outdir_data=None,
     wcs=None,
     debug_subtraction=False,
     debug_energy_gev=3.775,
@@ -666,6 +615,9 @@ def derive_bubbles_mask_sca(
     smooth_basis="poly",
     smooth_l_max=9,
     smooth_library_max_modes=100,
+    subtract_ics=False,
+    subtract_iso=False,
+    subtract_loopi=False,
     mask_lon_max_deg=None,
     mask_lat_max_deg=None,
 ):
@@ -710,10 +662,20 @@ def derive_bubbles_mask_sca(
             n_max_modes=int(smooth_library_max_modes),
         )
         fitmask_dbg = roi2d & (np.abs(lat) >= sca_fit_lat_min)
+
+        trusted_mus_dbg = [mu_gas[k_dbg], mu_ps[k_dbg]]
+        trusted_names_dbg = ["Gas", "Point sources"]
+        if subtract_ics and (mu_ics is not None):
+            trusted_mus_dbg.append(mu_ics[k_dbg]); trusted_names_dbg.append("ICS")
+        if subtract_iso and (mu_iso is not None):
+            trusted_mus_dbg.append(mu_iso[k_dbg]); trusted_names_dbg.append("Isotropic")
+        if subtract_loopi and (mu_loopi is not None):
+            trusted_mus_dbg.append(mu_loopi[k_dbg]); trusted_names_dbg.append("Loop I")
+
         proxies_selected = select_smooth_proxies_by_delta_chi2(
             counts_k=counts[k_dbg],
-            mu_gas_k=mu_gas[k_dbg],
-            mu_ps_k=mu_ps[k_dbg],
+            trusted_mu_k=trusted_mus_dbg,
+            trusted_names=trusted_names_dbg,
             roi2d=roi2d,
             fitmask2d=fitmask_dbg,
             library=library,
@@ -731,6 +693,13 @@ def derive_bubbles_mask_sca(
 
         comps.append(mu_gas[k]); names.append("Gas"); trusted.append(True)
         comps.append(mu_ps[k]); names.append("Point sources"); trusted.append(True)
+
+        if subtract_ics and (mu_ics is not None):
+            comps.append(mu_ics[k]); names.append("ICS"); trusted.append(True)
+        if subtract_iso and (mu_iso is not None):
+            comps.append(mu_iso[k]); names.append("Isotropic"); trusted.append(True)
+        if subtract_loopi and (mu_loopi is not None):
+            comps.append(mu_loopi[k]); names.append("Loop I"); trusted.append(True)
 
         if str(smooth_basis).lower() == "ylm":
             proxies = [t for _, t in (proxies_selected or [])]
@@ -895,15 +864,22 @@ def derive_bubbles_mask_sca(
             # Print one compact line per energy bin
             if j == 0:
                 print("[counts-by-bin] Columns are sums over mask (ROI / FIT / GOOD):")
-                print("[counts-by-bin] E_GeV  data  |  GAS(un,sc)  PS(un,sc)  |  model_trusted  resid")
+                cols = ["GAS(un,sc)", "PS(un,sc)"]
+                if subtract_ics:
+                    cols.append("ICS(un,sc)")
+                if subtract_iso:
+                    cols.append("ISO(un,sc)")
+                if subtract_loopi:
+                    cols.append("LoopI(un,sc)")
+                print("[counts-by-bin] E_GeV  data  |  " + "  ".join(cols) + "  |  model_trusted  resid")
 
             def _fmt(v):
                 return f"{v:.3g}"
 
-            def _pair(nm, mask):
+            def _pair(name, mask):
                 return (
-                    _sum(mu_unscaled[nm], mask),
-                    _sum(mu_scaled[nm], mask),
+                    _sum(mu_unscaled[name], mask),
+                    _sum(mu_scaled[name], mask),
                 )
 
             gas_nm = "Gas"
@@ -917,19 +893,51 @@ def derive_bubbles_mask_sca(
             ps_fit_u, ps_fit_s = _pair(ps_nm, fit_mask)
             ps_dom_u, ps_dom_s = _pair(ps_nm, dom_mask)
 
+            ics_txt = ""
+            iso_txt = ""
+            loopi_txt = ""
+            if subtract_ics:
+                ics_roi_u, ics_roi_s = _pair("ICS", roi_mask)
+                ics_fit_u, ics_fit_s = _pair("ICS", fit_mask)
+                ics_dom_u, ics_dom_s = _pair("ICS", dom_mask)
+                ics_txt = f"ICS={_fmt(ics_roi_u)},{_fmt(ics_roi_s)}/{_fmt(ics_fit_u)},{_fmt(ics_fit_s)}/{_fmt(ics_dom_u)},{_fmt(ics_dom_s)}  "
+            if subtract_iso:
+                iso_roi_u, iso_roi_s = _pair("Isotropic", roi_mask)
+                iso_fit_u, iso_fit_s = _pair("Isotropic", fit_mask)
+                iso_dom_u, iso_dom_s = _pair("Isotropic", dom_mask)
+                iso_txt = f"ISO={_fmt(iso_roi_u)},{_fmt(iso_roi_s)}/{_fmt(iso_fit_u)},{_fmt(iso_fit_s)}/{_fmt(iso_dom_u)},{_fmt(iso_dom_s)}  "
+            if subtract_loopi:
+                loopi_roi_u, loopi_roi_s = _pair("Loop I", roi_mask)
+                loopi_fit_u, loopi_fit_s = _pair("Loop I", fit_mask)
+                loopi_dom_u, loopi_dom_s = _pair("Loop I", dom_mask)
+                loopi_txt = f"LoopI={_fmt(loopi_roi_u)},{_fmt(loopi_roi_s)}/{_fmt(loopi_fit_u)},{_fmt(loopi_fit_s)}/{_fmt(loopi_dom_u)},{_fmt(loopi_dom_s)}  "
+
             print(
                 f"[counts-by-bin] {Ectr_gev[k]:7.3f}  "
                 f"data={_fmt(data_roi)}/{_fmt(data_fit)}/{_fmt(data_dom)}  |  "
                 f"GAS={_fmt(gas_roi_u)},{_fmt(gas_roi_s)}/{_fmt(gas_fit_u)},{_fmt(gas_fit_s)}/{_fmt(gas_dom_u)},{_fmt(gas_dom_s)}  "
                 f"PS={_fmt(ps_roi_u)},{_fmt(ps_roi_s)}/{_fmt(ps_fit_u)},{_fmt(ps_fit_s)}/{_fmt(ps_dom_u)},{_fmt(ps_dom_s)}  |  "
+                f"{ics_txt}{iso_txt}{loopi_txt}"
                 f"model={_fmt(model_roi)}/{_fmt(model_fit)}/{_fmt(model_dom)}  "
                 f"resid={_fmt(resid_roi)}/{_fmt(resid_fit)}/{_fmt(resid_dom)}"
             )
 
 
         # --- DEBUG PLOTS: BEFORE SCA hard/soft fit (i.e., before building R/Sig arrays)
-        if debug_subtraction and (outdir is not None) and (wcs is not None) and (k == k_dbg):
-            out_png = os.path.join(outdir, f"debug_subtraction_E{Ectr_gev[k]:.3f}GeV.png")
+        if debug_subtraction and (outdir_plots is not None) and (wcs is not None) and (k == k_dbg):
+            out_png = os.path.join(outdir_plots, f"debug_subtraction_E{Ectr_gev[k]:.3f}GeV.png")
+
+            trusted_scaled = {
+                "Gas": components_scaled.get("Gas", np.zeros((ny, nx))),
+                "Point sources": components_scaled.get("Point sources", np.zeros((ny, nx))),
+            }
+            if subtract_ics and ("ICS" in components_scaled):
+                trusted_scaled["ICS"] = components_scaled["ICS"]
+            if subtract_iso and ("Isotropic" in components_scaled):
+                trusted_scaled["Isotropic"] = components_scaled["Isotropic"]
+            if subtract_loopi and ("Loop I" in components_scaled):
+                trusted_scaled["Loop I"] = components_scaled["Loop I"]
+
             plot_subtraction_diagnostics(
                 out_png=out_png,
                 wcs=wcs,
@@ -941,18 +949,17 @@ def derive_bubbles_mask_sca(
                 expo_k=expo[k],
                 omega=omega,
                 dE_mev_k=dE_mev[k],
-                components_scaled={
-                    "Gas": components_scaled.get("Gas", np.zeros((ny, nx))),
-                    "Point sources": components_scaled.get("Point sources", np.zeros((ny, nx))),
-                    "Smooth proxies (sum)": smooth_model,
-                },
-                model_counts=model_trusted,
-                resid_counts=resid_counts,
+                trusted_components_scaled=trusted_scaled,
+                smooth_model_counts=smooth_model,
+                trusted_model_counts=model_trusted,
+                all_model_counts=model_all,
+                resid_after_trusted_counts=resid_counts,
+                resid_after_all_counts=resid_after_all,
                 binsz_deg=binsz_deg,
             )
             print("✓ Wrote", out_png)
 
-            out_png2 = os.path.join(outdir, f"debug_subtraction_masked_E{Ectr_gev[k]:.3f}GeV.png")
+            out_png2 = os.path.join(outdir_plots, f"debug_subtraction_masked_E{Ectr_gev[k]:.3f}GeV.png")
             plot_subtraction_diagnostics_masked(
                 out_png=out_png2,
                 wcs=wcs,
@@ -962,13 +969,12 @@ def derive_bubbles_mask_sca(
                 expo_k=expo[k],
                 omega=omega,
                 dE_mev_k=dE_mev[k],
-                components_scaled={
-                    "Gas": components_scaled.get("Gas", np.zeros((ny, nx))),
-                    "Point sources": components_scaled.get("Point sources", np.zeros((ny, nx))),
-                    "Smooth proxies (sum)": smooth_model,
-                },
-                model_counts=model_trusted,
-                resid_counts=resid_counts,
+                trusted_components_scaled=trusted_scaled,
+                smooth_model_counts=smooth_model,
+                trusted_model_counts=model_trusted,
+                all_model_counts=model_all,
+                resid_after_trusted_counts=resid_counts,
+                resid_after_all_counts=resid_after_all,
                 binsz_deg=binsz_deg,
             )
             print("✓ Wrote", out_png2)
@@ -1086,8 +1092,8 @@ def derive_bubbles_mask_sca(
     if south_best:
         keep |= (lab == south_best)
 
-    if debug_subtraction and (outdir is not None) and (wcs is not None):
-        out_png = os.path.join(outdir, "debug_subtraction_sum_1to10GeV.png")
+    if debug_subtraction and (outdir_plots is not None) and (wcs is not None):
+        out_png = os.path.join(outdir_plots, "debug_subtraction_sum_1to10GeV.png")
         plot_subtraction_diagnostics(
             out_png=out_png,
             wcs=wcs,
@@ -1206,12 +1212,12 @@ def build_smooth_proxies_ylm_2d(
 def select_smooth_proxies_by_delta_chi2(
     *,
     counts_k,
-    mu_gas_k,
-    mu_ps_k,
+    trusted_mu_k,
+    trusted_names,
     roi2d,
     fitmask2d,
     library,
-    n_keep,
+    n_keep=30,
     eps=1.0,
 ):
     """Rank candidate smooth modes by delta-chi2 improvement added on top of gas+PS.
@@ -1222,15 +1228,20 @@ def select_smooth_proxies_by_delta_chi2(
       3) for each candidate template t, compute best signed coefficient a and
          delta-chi2 improvement analytically under weighted least squares.
     """
+    if (trusted_mu_k is None) or (len(trusted_mu_k) == 0):
+        raise RuntimeError("trusted_mu_k must be a non-empty list")
+
     A0 = fit_bin_weighted_nnls(
         counts_k,
-        [mu_gas_k, mu_ps_k],
+        list(trusted_mu_k),
         fitmask2d,
         eps=eps,
         normalize_components=True,
         weights_mode="poisson",
     )
-    model0 = A0[0] * mu_gas_k + A0[1] * mu_ps_k
+    model0 = np.zeros_like(counts_k, dtype=float)
+    for a, mu in zip(A0, trusted_mu_k):
+        model0 += a * mu
     r = counts_k - model0
 
     m = fitmask2d & np.isfinite(r) & np.isfinite(counts_k)
@@ -1262,12 +1273,13 @@ def select_smooth_proxies_by_delta_chi2(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--counts", required=False)
-    ap.add_argument("--expo", required=False)
-    ap.add_argument("--templates-dir", required=False)
+    ap.add_argument("--counts", default=os.path.join(DATA_DIR, "processed", "counts_ccube_1000to1000000.fits"))
+    ap.add_argument("--expcube", default=os.path.join(DATA_DIR, "processed", "expcube_1000to1000000.fits"))
+    ap.add_argument("--templates-dir", default=os.path.join(DATA_DIR, "processed", "templates"))
     ap.add_argument("--ext-mask", required=False, help="extended-source mask FITS True=keep")
     ap.add_argument("--ps-mask", required=False, help="optional point-source mask FITS True=keep")
-    ap.add_argument("--outdir", default=os.path.join(os.path.dirname(__file__), "plots_fig1"))
+    ap.add_argument("--outdir-plots", default=os.path.join(os.path.dirname(__file__), "debug_plots"))
+    ap.add_argument("--outdir-data", default=os.path.join(DATA_DIR, "processed", "templates"))
 
     ap.add_argument("--roi-lon", type=float, default=60.0)
     ap.add_argument("--roi-lat", type=float, default=60.0)
@@ -1293,8 +1305,11 @@ def main():
     ap.add_argument("--sca-smooth-library-max-modes", type=int, default=100)
     ap.add_argument("--sca-debug-subtraction", action="store_true")
 
-    ap.add_argument("--user-mask-north-verts", type=str, default=None)
-    ap.add_argument("--user-mask-south-verts", type=str, default=None)
+    ap.add_argument("--user-mask-north-verts", type=str, default="bubble_vertices_north.txt")
+    ap.add_argument("--user-mask-south-verts", type=str, default="bubble_vertices_south.txt")
+    ap.add_argument("--sca-subtract-ics", action="store_true")
+    ap.add_argument("--sca-subtract-iso", action="store_true")
+    ap.add_argument("--sca-subtract-loopi", action="store_true")
     ap.add_argument("--products-prefix", type=str, default="bubbles_vertices_sca")
 
     args = ap.parse_args()
@@ -1318,7 +1333,31 @@ def _run_sca_default(args):
 
     counts_m, expo_m, mask_all = _stage_apply_keep_masks(args=args, counts=counts, expo=expo, roi2d=roi2d, templates_dir=templates_dir)
     mu_gas_m, mu_ps_m = _stage_load_mu_templates(templates_dir=templates_dir, mask_all=mask_all, counts_shape=counts.shape)
-    mu_dummy = np.zeros_like(mu_gas_m)
+
+    mu_ics_m = None
+    mu_iso_m = None
+    mu_loopi_m = None
+    if args.sca_subtract_ics:
+        mu_ics_m = _stage_load_optional_mu_template(
+            templates_dir=templates_dir,
+            name="ics",
+            mask_all=mask_all,
+            counts_shape=counts.shape,
+        )
+    if args.sca_subtract_iso:
+        mu_iso_m = _stage_load_optional_mu_template(
+            templates_dir=templates_dir,
+            name="iso",
+            mask_all=mask_all,
+            counts_shape=counts.shape,
+        )
+    if args.sca_subtract_loopi:
+        mu_loopi_m = _stage_load_optional_mu_template(
+            templates_dir=templates_dir,
+            name="loopI",
+            mask_all=mask_all,
+            counts_shape=counts.shape,
+        )
 
     connected_mask, sig_sm, above_thresh, Hmap, Smap = derive_bubbles_mask_sca(
         counts=counts_m,
@@ -1329,9 +1368,10 @@ def _run_sca_default(args):
         lon_w=lon,
         lat=lat,
         mu_gas=mu_gas_m,
-        mu_ics=mu_dummy,
-        mu_iso=mu_dummy,
+        mu_ics=mu_ics_m,
+        mu_iso=mu_iso_m,
         mu_ps=mu_ps_m,
+        mu_loopi=mu_loopi_m,
         roi2d=roi2d,
         binsz_deg=args.binsz,
         e_min_gev=args.sca_e_min_gev,
@@ -1344,7 +1384,8 @@ def _run_sca_default(args):
         sca_fit_lat_min=args.sca_fit_lat_min,
         sca_domain_lat_min=args.sca_domain_lat_min,
         hilat_cut_deg=args.disk_cut,
-        outdir=args.outdir,
+        outdir_data=args.outdir_data,
+        outdir_plots=args.outdir_plots,
         wcs=wcs,
         debug_subtraction=args.sca_debug_subtraction,
         smooth_terms=args.sca_smooth_terms,
@@ -1352,6 +1393,9 @@ def _run_sca_default(args):
         smooth_basis=args.sca_smooth_basis,
         smooth_l_max=args.sca_smooth_l_max,
         smooth_library_max_modes=args.sca_smooth_library_max_modes,
+        subtract_ics=bool(args.sca_subtract_ics),
+        subtract_iso=bool(args.sca_subtract_iso),
+        subtract_loopi=bool(args.sca_subtract_loopi),
         mask_lon_max_deg=args.sca_mask_lon_max_deg,
         mask_lat_max_deg=args.sca_mask_lat_max_deg,
     )

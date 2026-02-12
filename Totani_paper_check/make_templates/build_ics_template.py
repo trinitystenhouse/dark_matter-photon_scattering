@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 
 import os
+import sys
+
 import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
 from scipy.interpolate import RegularGridInterpolator
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from totani_helpers.totani_io import pixel_solid_angle_map, read_exposure, resample_exposure_logE
 
 REPO_DIR = os.environ["REPO_PATH"]
 DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
@@ -20,49 +25,11 @@ def read_counts_bins(counts_ccube_path):
     return hdr, emin, emax, ectr
 
 
-def read_exposure(expcube_path):
-    with fits.open(expcube_path) as h:
-        expo = h[0].data.astype(float)
-        E = None
-        if "ENERGIES" in h:
-            tab = h["ENERGIES"].data
-            col = tab.columns.names[0]
-            E = np.array(tab[col], float)  # MeV (as written by gtexpcube2)
-        elif "EBOUNDS" in h:
-            eb = h["EBOUNDS"].data
-            Emin = np.array(eb["E_MIN"], float)
-            Emax = np.array(eb["E_MAX"], float)
-            E = np.sqrt(Emin * Emax)
-    return expo, E
-
-
 def interp_energy_planes(cube, E_src, E_tgt):
     if E_src is None:
         raise RuntimeError("No energy axis available to interpolate.")
 
-    if cube.shape[0] == len(E_tgt):
-        return cube
-
-    o = np.argsort(E_src)
-    E_src = E_src[o]
-    cube = cube[o].astype(float)
-
-    logEs = np.log(E_src)
-    logEt = np.log(E_tgt)
-
-    ne, ny, nx = cube.shape
-    flat = cube.reshape(ne, ny * nx)
-
-    idx = np.searchsorted(logEs, logEt)
-    idx = np.clip(idx, 1, ne - 1)
-    i0 = idx - 1
-    i1 = idx
-    w = (logEt - logEs[i0]) / (logEs[i1] - logEs[i0])
-
-    out = np.empty((len(E_tgt), ny * nx), float)
-    for j in range(len(E_tgt)):
-        out[j] = (1.0 - w[j]) * flat[i0[j]] + w[j] * flat[i1[j]]
-    return out.reshape(len(E_tgt), ny, nx)
+    return resample_exposure_logE(cube, E_src, E_tgt)
 
 
 def reproject_plane_to_target(src_plane, w_src, w_tgt, ny_tgt, nx_tgt):
@@ -90,16 +57,6 @@ def reproject_cube_to_target(src_cube, w_src, w_tgt, ny_tgt, nx_tgt):
     for k in range(src_cube.shape[0]):
         out[k] = reproject_plane_to_target(src_cube[k], w_src, w_tgt, ny_tgt, nx_tgt)
     return out
-
-
-def pixel_solid_angle_map(wcs, ny, nx, binsz_deg):
-    dl = np.deg2rad(binsz_deg)
-    db = np.deg2rad(binsz_deg)
-    y = np.arange(ny)
-    x_mid = np.full(ny, (nx - 1) / 2.0)
-    _, b_deg = wcs.pixel_to_world_values(x_mid, y)
-    omega_row = dl * db * np.cos(np.deg2rad(b_deg))
-    return omega_row[:, None] * np.ones((1, nx), dtype=float)
 
 
 def read_mapcube(path):

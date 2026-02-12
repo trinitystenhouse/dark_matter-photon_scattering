@@ -14,17 +14,21 @@ Notes:
 """
 
 import os
+import sys
 import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
+from scipy.ndimage import gaussian_filter
 from make_nfw_rho25 import make_nfw_rho25_template
-
 
 # -------------------------
 # Paths
 # -------------------------
 REPO_DIR = os.environ["REPO_PATH"]
 DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from totani_helpers.totani_io import pixel_solid_angle_map, resample_exposure_logE
 COUNTS = os.path.join(DATA_DIR, "processed", "counts_ccube_1000to1000000.fits")
 EXPO = os.path.join(DATA_DIR, "processed", "expcube_1000to1000000.fits")
 OUTDIR = os.path.join(DATA_DIR, "processed", "templates")
@@ -46,68 +50,31 @@ SPECTRUM = "flat"  # placeholder; keep flat for now
 
 
 # -------------------------
-# Helpers
-# -------------------------
-def resample_exposure_logE(expo_raw, E_expo_mev, E_tgt_mev):
-    """
-    Interpolate exposure(E) onto target energies using linear interpolation in log(E).
-
-    expo_raw: (Ne, ny, nx)
-    E_expo_mev, E_tgt_mev: MeV
-    """
-    if expo_raw.shape[0] == len(E_tgt_mev):
-        return expo_raw
-    if E_expo_mev is None:
-        raise RuntimeError("Exposure planes != counts planes, and EXPO has no ENERGIES table to interpolate.")
-
-    order = np.argsort(E_expo_mev)
-    E_expo_mev = E_expo_mev[order]
-    expo_raw = expo_raw[order].astype(float)
-
-    logEs = np.log(E_expo_mev)
-    logEt = np.log(E_tgt_mev)
-
-    ne, ny, nx = expo_raw.shape
-    flat = expo_raw.reshape(ne, ny * nx)
-
-    idx = np.searchsorted(logEs, logEt)
-    idx = np.clip(idx, 1, ne - 1)
-    i0 = idx - 1
-    i1 = idx
-
-    w = (logEt - logEs[i0]) / (logEs[i1] - logEs[i0])
-
-    out = np.empty((len(E_tgt_mev), ny * nx), float)
-    for j in range(len(E_tgt_mev)):
-        out[j] = (1.0 - w[j]) * flat[i0[j]] + w[j] * flat[i1[j]]
-
-    return out.reshape(len(E_tgt_mev), ny, nx)
-
-
-def pixel_solid_angle_map(wcs, ny, nx, binsz_deg):
-    """Match your PS template: Ω_pix ≈ Δl Δb cos(b) for CAR."""
-    dl = np.deg2rad(binsz_deg)
-    db = np.deg2rad(binsz_deg)
-    y = np.arange(ny)
-    x_mid = np.full(ny, (nx - 1) / 2.0)
-    _, b_deg = wcs.pixel_to_world_values(x_mid, y)
-    omega_row = dl * db * np.cos(np.deg2rad(b_deg))
-    return omega_row[:, None] * np.ones((1, nx), float)
-
-
-# -------------------------
 # Read counts binning (authoritative)
 # -------------------------
 with fits.open(COUNTS) as h:
     hdr = h[0].header
     eb  = h["EBOUNDS"].data
-    print(eb)
+    # Debug: print energy binning as stored in the counts cube
 
-Emin_mev = eb["E_MIN"].astype(float) / 1000
-Emax_mev = eb["E_MAX"].astype(float) / 1000
+Emin_kev = eb["E_MIN"].astype(float)
+Emax_kev = eb["E_MAX"].astype(float)
+Ectr_kev = np.sqrt(Emin_kev * Emax_kev)
+
+Emin_mev = Emin_kev / 1000.0
+Emax_mev = Emax_kev / 1000.0
 dE_mev   = (Emax_mev - Emin_mev)
 Ectr_mev = np.sqrt(Emin_mev * Emax_mev)
-print(Ectr_mev)
+
+print("[E] counts EBOUNDS:")
+print("[E]   Emin_keV:", np.round(Emin_kev, 3))
+print("[E]   Emax_keV:", np.round(Emax_kev, 3))
+print("[E]   Ectr_keV:", np.round(Ectr_kev, 3))
+print("[E]   Emin_MeV:", np.round(Emin_mev, 6))
+print("[E]   Emax_MeV:", np.round(Emax_mev, 6))
+print("[E]   Ectr_MeV:", np.round(Ectr_mev, 6))
+print("[E]   Ectr_GeV:", np.round(Ectr_mev / 1000.0, 6))
+print("[E]   dE_MeV  :", np.round(dE_mev, 6))
 
 nE = len(Ectr_mev)
 
@@ -124,6 +91,14 @@ with fits.open(EXPO) as h:
     if "ENERGIES" in h:
         col0 = h["ENERGIES"].columns.names[0]
         E_expo_mev = np.array(h["ENERGIES"].data[col0], dtype=float)  # MeV
+        print("[E] expcube ENERGIES (as stored, assumed MeV):")
+        print("[E]   N:", int(E_expo_mev.size))
+        print("[E]   min/max:", float(np.nanmin(E_expo_mev)), float(np.nanmax(E_expo_mev)))
+        print("[E]   first/last:", float(E_expo_mev[0]), float(E_expo_mev[-1]))
+    else:
+        print("[E] expcube has no ENERGIES extension")
+
+print("[E] expcube planes (raw):", expo_raw.shape)
 
 if expo_raw.shape[1:] != (ny, nx):
     raise RuntimeError(f"Exposure spatial shape {expo_raw.shape[1:]} != counts {(ny, nx)}")
@@ -131,6 +106,8 @@ if expo_raw.shape[1:] != (ny, nx):
 expo = resample_exposure_logE(expo_raw, E_expo_mev, Ectr_mev)
 if expo.shape[0] != nE:
     raise RuntimeError(f"Exposure after resampling has {expo.shape[0]} planes, expected {nE}")
+
+print("[E] expcube planes (resampled):", expo.shape)
 
 # -------------------------
 # Build lon/lat grid

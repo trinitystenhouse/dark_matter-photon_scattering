@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import sys
 
 import numpy as np
 from astropy.io import fits
@@ -13,49 +14,12 @@ from scipy.optimize import minimize
 REPO_DIR = os.environ["REPO_PATH"]
 DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from totani_helpers.totani_io import pixel_solid_angle_map, resample_exposure_logE
+
 R_SUN_KPC = 8.25
 RS_KPC = 20.0
 S_MAX_KPC = 50.0
-
-
-def pixel_solid_angle_map(wcs, ny, nx, binsz_deg):
-    dl = np.deg2rad(binsz_deg)
-    db = np.deg2rad(binsz_deg)
-    y = np.arange(ny)
-    x_mid = np.full(ny, (nx - 1) / 2.0)
-    _, b_deg = wcs.pixel_to_world_values(x_mid, y)
-    omega_row = dl * db * np.cos(np.deg2rad(b_deg))
-    return omega_row[:, None] * np.ones((1, nx), dtype=float)
-
-
-def resample_exposure_logE(expo_raw, E_expo_mev, E_tgt_mev):
-    if expo_raw.shape[0] == len(E_tgt_mev):
-        return expo_raw
-    if E_expo_mev is None:
-        raise RuntimeError("Exposure planes != counts planes and EXPO has no ENERGIES table.")
-
-    order = np.argsort(E_expo_mev)
-    E_expo_mev = E_expo_mev[order]
-    expo_raw = expo_raw[order].astype(float)
-
-    logEs = np.log(E_expo_mev)
-    logEt = np.log(E_tgt_mev)
-
-    ne, ny, nx = expo_raw.shape
-    flat = expo_raw.reshape(ne, ny * nx)
-
-    idx = np.searchsorted(logEs, logEt)
-    idx = np.clip(idx, 1, ne - 1)
-    i0 = idx - 1
-    i1 = idx
-
-    w = (logEt - logEs[i0]) / (logEs[i1] - logEs[i0])
-
-    out = np.empty((len(E_tgt_mev), ny * nx), float)
-    for j in range(len(E_tgt_mev)):
-        out[j] = (1.0 - w[j]) * flat[i0[j]] + w[j] * flat[i1[j]]
-
-    return out.reshape(len(E_tgt_mev), ny, nx)
 
 
 def gNFW_rho(r_kpc, gamma):

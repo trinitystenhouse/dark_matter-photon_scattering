@@ -20,53 +20,17 @@ fit), consistent with Totani's treatment of energy-independent morphologies.
 
 import argparse
 import os
+import sys
 
 import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from totani_helpers.totani_io import pixel_solid_angle_map, resample_exposure_logE
+
 REPO_DIR = os.environ["REPO_PATH"]
 DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
-
-def pixel_solid_angle_map(wcs, ny, nx, binsz_deg):
-    """Ω_pix ≈ Δl Δb cos(b) for CAR (matches your other template builders)."""
-    dl = np.deg2rad(binsz_deg)
-    db = np.deg2rad(binsz_deg)
-    y = np.arange(ny)
-    x_mid = np.full(ny, (nx - 1) / 2.0)
-    _, b_deg = wcs.pixel_to_world_values(x_mid, y)
-    omega_row = dl * db * np.cos(np.deg2rad(b_deg))
-    return omega_row[:, None] * np.ones((1, nx), dtype=float)
-
-
-def resample_exposure_logE(expo_raw, E_expo_mev, E_tgt_mev):
-    """Interpolate exposure planes onto target energy centers in log(E)."""
-    if expo_raw.shape[0] == len(E_tgt_mev):
-        return expo_raw
-    if E_expo_mev is None:
-        raise RuntimeError("Exposure planes != counts planes and EXPO has no ENERGIES table.")
-
-    order = np.argsort(E_expo_mev)
-    E_expo_mev = E_expo_mev[order]
-    expo_raw = expo_raw[order]
-
-    logEs = np.log(E_expo_mev)
-    logEt = np.log(E_tgt_mev)
-
-    ne, ny, nx = expo_raw.shape
-    flat = expo_raw.reshape(ne, ny * nx)
-
-    idx = np.searchsorted(logEs, logEt)
-    idx = np.clip(idx, 1, ne - 1)
-    i0 = idx - 1
-    i1 = idx
-    w = (logEt - logEs[i0]) / (logEs[i1] - logEs[i0])
-
-    out = np.empty((len(E_tgt_mev), ny * nx), float)
-    for j in range(len(E_tgt_mev)):
-        out[j] = (1 - w[j]) * flat[i0[j]] + w[j] * flat[i1[j]]
-    return out.reshape(len(E_tgt_mev), ny, nx)
-
 
 def write_primary_with_bunit(path, data, hdr, bunit, comments):
     hdu = fits.PrimaryHDU(data.astype(np.float32), header=hdr)
@@ -154,12 +118,24 @@ def main():
 
     Emin_kev = eb["E_MIN"].astype(float)
     Emax_kev = eb["E_MAX"].astype(float)
+    Ectr_kev = np.sqrt(Emin_kev * Emax_kev)
+
     Emin_mev = Emin_kev / 1000.0
     Emax_mev = Emax_kev / 1000.0
     dE_mev = (Emax_mev - Emin_mev)
     Ectr_mev = np.sqrt(Emin_mev * Emax_mev)
 
     nE = len(Ectr_mev)
+
+    print("[E] counts EBOUNDS:")
+    print("[E]   Emin_keV:", np.round(Emin_kev, 3))
+    print("[E]   Emax_keV:", np.round(Emax_kev, 3))
+    print("[E]   Ectr_keV:", np.round(Ectr_kev, 3))
+    print("[E]   Emin_MeV:", np.round(Emin_mev, 6))
+    print("[E]   Emax_MeV:", np.round(Emax_mev, 6))
+    print("[E]   Ectr_MeV:", np.round(Ectr_mev, 6))
+    print("[E]   Ectr_GeV:", np.round(Ectr_mev / 1000.0, 6))
+    print("[E]   dE_MeV  :", np.round(dE_mev, 6))
 
     # --- exposure (cm^2 s), resample if needed ---
     with fits.open(args.expcube) as h:
@@ -168,10 +144,20 @@ def main():
         if "ENERGIES" in h:
             col0 = h["ENERGIES"].columns.names[0]
             E_expo_mev = np.array(h["ENERGIES"].data[col0], dtype=float)
+            print("[E] expcube ENERGIES (as stored, assumed MeV):")
+            print("[E]   N:", int(E_expo_mev.size))
+            print("[E]   min/max:", float(np.nanmin(E_expo_mev)), float(np.nanmax(E_expo_mev)))
+            print("[E]   first/last:", float(E_expo_mev[0]), float(E_expo_mev[-1]))
+        else:
+            print("[E] expcube has no ENERGIES extension")
+
+    print("[E] expcube planes (raw):", expo_raw.shape)
 
     expo = resample_exposure_logE(expo_raw, E_expo_mev, Ectr_mev)
     if expo.shape != (nE, ny, nx):
         raise RuntimeError(f"Exposure shape {expo.shape} not compatible with {(nE, ny, nx)}")
+
+    print("[E] expcube planes (resampled):", expo.shape)
 
     # --- lon/lat, omega ---
     yy, xx = np.mgrid[:ny, :nx]

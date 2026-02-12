@@ -7,18 +7,14 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.coordinates import SkyCoord
 import astropy.units as u
-from scipy.ndimage import gaussian_filter
-from totani_helpers.exposure import resample_exposure
+from totani_helpers.totani_io import *
 from scipy.optimize import nnls
 
-def set_lon_ticks_wrapped(ax, wcs, ny, nx, lons_deg=(-60, -30, 0, 30, 60)):
-    xs = []
-    for L in lons_deg:
-        L360 = L % 360
-        x, _ = wcs.world_to_pixel_values(L360, 0.0)  # place ticks at b=0
-        xs.append(x)
-    ax.set_xticks(xs)
-    ax.set_xticklabels([f"{L:d}" for L in lons_deg])
+try:
+    from skimage.measure import find_contours
+except Exception:
+    find_contours = None
+
 # -------------------------
 # Inputs
 # -------------------------
@@ -42,10 +38,16 @@ ROI_LAT_DEG = 60.0
 CELL_DEG = 10.0
 
 # Template inputs for Totani-style bubble construction (counts templates)
-MU_IEM = os.path.join(DATA_DIR, "processed", "templates", "mu_iem_counts.fits")
+MU_GAS = os.path.join(DATA_DIR, "processed", "templates", "mu_gas_counts.fits")
+MU_ICS = os.path.join(DATA_DIR, "processed", "templates", "mu_ics_counts.fits")
 MU_ISO = os.path.join(DATA_DIR, "processed", "templates", "mu_iso_counts.fits")
 MU_PS = os.path.join(DATA_DIR, "processed", "templates", "mu_ps_counts.fits")
 MU_NFW = os.path.join(DATA_DIR, "processed", "templates", "mu_nfw_counts.fits")
+
+# Prebuilt Totani-style bubble templates (made by make_templates/build_fermi_bubbles_templates.py)
+BUBBLES_POS_DNDE = os.path.join(DATA_DIR, "processed", "templates", "bubbles_pos_dnde.fits")
+BUBBLES_NEG_DNDE = os.path.join(DATA_DIR, "processed", "templates", "bubbles_neg_dnde.fits")
+BUBBLES_FLAT_DNDE = os.path.join(DATA_DIR, "processed", "templates", "bubbles_vertices_sca_full_dnde.fits")
 
 # Optional: provide a FITS mask (ny,nx) on the counts grid representing Totani's
 # final flat-bubble boundary (1 inside, 0 outside). If None, uses heuristic box.
@@ -57,17 +59,6 @@ MARKER_RADIUS_DEG = 1.0
 MARKER_LW = 1.0
 
 # -------------------------
-def smooth_nan_2d(x2d, sigma_pix):
-    m = np.isfinite(x2d)
-    if not np.any(m):
-        return np.full_like(x2d, np.nan)
-    w = m.astype(float)
-    xs = gaussian_filter(np.where(m, x2d, 0.0), sigma_pix)
-    ws = gaussian_filter(w, sigma_pix)
-    y = np.full_like(x2d, np.nan, dtype=float)
-    ok = ws > 0
-    y[ok] = xs[ok] / ws[ok]
-    return y
 
 
 def _heuristic_flat_bubble_mask(lon_deg, lat_deg, lon_max=20.0, lat_min=10.0, lat_max=55.0):
@@ -94,7 +85,8 @@ def fit_bin_weighted_nnls(counts_2d, mu_components, mask_2d, eps=1.0):
 def build_bubble_image_counts_cellwise(
     counts_2d,
     *,
-    mu_iem_2d,
+    mu_gas_2d,
+    mu_ics_2d,
     mu_iso_2d,
     mu_ps_2d,
     mu_nfw_2d,
@@ -118,18 +110,19 @@ def build_bubble_image_counts_cellwise(
             if not np.any(cell_mask):
                 continue
 
-            mu_components = [mu_iem_2d, mu_iso_2d, mu_ps_2d, mu_nfw_2d, mu_flat_2d]
+            mu_components = [mu_gas_2d, mu_ics_2d, mu_iso_2d, mu_ps_2d, mu_nfw_2d, mu_flat_2d]
             A = fit_bin_weighted_nnls(counts_2d, mu_components, cell_mask)
 
             model_all_cell = (
-                A[0] * mu_iem_2d[cell_mask]
-                + A[1] * mu_iso_2d[cell_mask]
-                + A[2] * mu_ps_2d[cell_mask]
-                + A[3] * mu_nfw_2d[cell_mask]
-                + A[4] * mu_flat_2d[cell_mask]
+                A[0] * mu_gas_2d[cell_mask]
+                + A[1] * mu_ics_2d[cell_mask]
+                + A[2] * mu_iso_2d[cell_mask]
+                + A[3] * mu_ps_2d[cell_mask]
+                + A[4] * mu_nfw_2d[cell_mask]
+                + A[5] * mu_flat_2d[cell_mask]
             )
             residual_cell = counts_2d[cell_mask] - model_all_cell
-            bubble_img_counts[cell_mask] = (A[4] * mu_flat_2d[cell_mask]) + residual_cell
+            bubble_img_counts[cell_mask] = (A[5] * mu_flat_2d[cell_mask]) + residual_cell
 
     return bubble_img_counts
 
@@ -169,15 +162,48 @@ def add_totani_overlays(ax, *, disk_band_2d, bubble_boundary_2d, ext_x=None, ext
             )
             ax.add_patch(circ)
 
+def _rdp_simplify(points_xy, epsilon):
+    if points_xy.shape[0] < 3:
+        return points_xy
 
-def load_mask_any_shape(mask_path, counts_shape):
-    m = fits.getdata(mask_path).astype(bool)
-    nE, ny, nx = counts_shape
-    if m.shape == (nE, ny, nx):
-        return m
-    if m.shape == (ny, nx):
-        return np.broadcast_to(m[None, :, :], (nE, ny, nx)).copy()
-    raise RuntimeError(f"Mask shape {m.shape} not compatible with counts shape {(nE, ny, nx)}")
+    p0 = points_xy[0]
+    p1 = points_xy[-1]
+    v = p1 - p0
+    vv = float(np.dot(v, v))
+    if vv == 0.0:
+        d = np.sqrt(np.sum((points_xy - p0) ** 2, axis=1))
+    else:
+        t = np.dot(points_xy - p0, v) / vv
+        t = np.clip(t, 0.0, 1.0)
+        proj = p0[None, :] + t[:, None] * v[None, :]
+        d = np.sqrt(np.sum((points_xy - proj) ** 2, axis=1))
+
+    i = int(np.argmax(d))
+    dmax = float(d[i])
+    if dmax <= epsilon:
+        return np.vstack([p0, p1])
+
+    left = _rdp_simplify(points_xy[: i + 1], epsilon)
+    right = _rdp_simplify(points_xy[i:], epsilon)
+    return np.vstack([left[:-1], right])
+
+
+def plot_boundary_polygon(ax, boundary_2d, *, color="w", lw=1.5, alpha=0.9, simplify_eps_pix=2.0):
+    if find_contours is None:
+        ax.contour(boundary_2d.astype(float), levels=[0.5], colors=color, linewidths=lw, alpha=alpha)
+        return
+
+    contours = find_contours(boundary_2d.astype(float), level=0.5)
+    if not contours:
+        return
+
+    contours = sorted(contours, key=lambda a: a.shape[0], reverse=True)
+    for c in contours:
+        if c.shape[0] < 10:
+            continue
+        xy = np.column_stack([c[:, 1], c[:, 0]])
+        xy_s = _rdp_simplify(xy, epsilon=simplify_eps_pix)
+        ax.plot(xy_s[:, 0], xy_s[:, 1], color=color, linewidth=lw, alpha=alpha)
 
 
 def load_mask_2d(mask_path, shape_2d):
@@ -264,10 +290,16 @@ def _read_mu(path, expected_shape):
         raise RuntimeError(f"{path} has shape {d.shape}, expected {expected_shape}")
     return d
 
-mu_iem = _read_mu(MU_IEM, counts.shape)
+mu_gas = _read_mu(MU_GAS, counts.shape)
+mu_ics = _read_mu(MU_ICS, counts.shape)
 mu_iso = _read_mu(MU_ISO, counts.shape)
 mu_ps = _read_mu(MU_PS, counts.shape)
 mu_nfw = _read_mu(MU_NFW, counts.shape)
+
+# Load prebuilt bubble templates (dN/dE; positive/negative are nonnegative by construction)
+bubbles_pos_dnde = _read_mu(BUBBLES_POS_DNDE, counts.shape)
+bubbles_neg_dnde = _read_mu(BUBBLES_NEG_DNDE, counts.shape)
+bubbles_flat_dnde = _read_mu(BUBBLES_FLAT_DNDE, counts.shape)
 
 # Extended sources (overlay)
 ext_coords = read_extended_sources(PSC) if PLOT_EXT_SOURCES else None
@@ -324,6 +356,9 @@ for itgt, tgt in enumerate(TARGET_GEV):
     # ✅ Outline the pixels you actually removed (extended sources + disk cut)
     ax.contour(~mask2d, levels=[0.5], linewidths=0.8, colors="k", alpha=0.8)
 
+    flat_boundary_2d = (bubbles_flat_dnde[k] > 0) & roi2d
+    plot_boundary_polygon(ax, flat_boundary_2d, color="w", lw=1.8, alpha=0.95, simplify_eps_pix=2.5)
+
     ax.set_title(f"Residual flux (E~{Ectr[k]:.1f} MeV)\nExtended-source + disk masked")
     ax.set_xlabel("Galactic longitude")
     ax.set_ylabel("Galactic latitude")
@@ -335,54 +370,8 @@ for itgt, tgt in enumerate(TARGET_GEV):
     plt.close()
     print("✓ wrote", out)
 
-    # -------------------------
-    # Totani-style bubble image from a fit at this energy:
-    # bubble_image = (best-fit flat bubble component + residuals)
-    # -------------------------
-    fit_mask2d = roi2d & ps_mask[k]  # include disk in fit (Totani does)
-
-    if BUBBLE_MASK_FITS is not None:
-        flat_mask = load_mask_2d(BUBBLE_MASK_FITS, (ny, nx))
-    else:
-        flat_mask = _heuristic_flat_bubble_mask(lon_w, lat2)
-    flat_mask &= fit_mask2d
-
-    T_flat = np.zeros((ny, nx), float)
-    T_flat[flat_mask] = 1.0
-    s = float(np.nansum(T_flat))
-    if np.isfinite(s) and s > 0:
-        T_flat /= s
-    else:
-        raise RuntimeError("Flat bubble mask is empty; cannot build bubble image")
-
-    # mu_flat consistent with your flux conversion: mu_flat ~ exposure * PIX_SR * dE * dnde
-    # Choose dnde_flat = T_flat / (PIX_SR * dE) so that mu_flat = T_flat * expo
-    mu_flat = T_flat * expo[k]
-
-    bubble_plus_residual_counts = build_bubble_image_counts_cellwise(
-        counts[k],
-        mu_iem_2d=mu_iem[k],
-        mu_iso_2d=mu_iso[k],
-        mu_ps_2d=mu_ps[k],
-        mu_nfw_2d=mu_nfw[k],
-        mu_flat_2d=mu_flat,
-        fit_mask2d=fit_mask2d,
-        lon_wrapped_deg=lon_w,
-        lat_deg=lat2,
-        cell_deg=CELL_DEG,
-    )
-
-    bubble_plus_residual_counts[~fit_mask2d] = np.nan
-
-    denom2 = expo[k] * PIX_SR * dE[k]
-    bubble_dnde = np.full((ny, nx), np.nan, float)
-    ok2 = (denom2 > 0) & np.isfinite(denom2)
-    bubble_dnde[ok2] = bubble_plus_residual_counts[ok2] / denom2[ok2]
-
-    bubble_sm = smooth_nan_2d(bubble_dnde, sigma_pix=sigma_pix)
-
-    # Display excludes disk (like Totani's Fig 1 shown region)
-    bubble_sm_plot = bubble_sm.copy()
+    signed_bubble_template = bubbles_pos_dnde[k] - bubbles_neg_dnde[k]
+    bubble_sm_plot = signed_bubble_template.copy()
     bubble_sm_plot[~mask2d] = np.nan
 
     fig = plt.figure(figsize=(7, 5))
@@ -398,7 +387,7 @@ for itgt, tgt in enumerate(TARGET_GEV):
     add_totani_overlays(
         ax,
         disk_band_2d=disk_band,
-        bubble_boundary_2d=flat_mask,
+        bubble_boundary_2d=flat_boundary_2d,
         ext_x=ext_x if ext_coords is not None else None,
         ext_y=ext_y if ext_coords is not None else None,
         marker_r_pix=marker_r_pix,

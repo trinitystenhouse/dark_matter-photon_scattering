@@ -10,12 +10,16 @@
 # then PSF-smoothed energy-dependently, conserving integrated bin flux.
 
 import os
+import sys
 import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 from scipy.ndimage import gaussian_filter
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from totani_helpers.totani_io import pixel_solid_angle_map, resample_exposure_logE
 
 
 # --------------------------------------------------
@@ -54,47 +58,6 @@ def _to_str(x):
     if isinstance(x, (bytes, bytearray)):
         return x.decode(errors="ignore")
     return str(x)
-
-def pixel_solid_angle_map(wcs, ny, nx, binsz_deg):
-    """
-    Ω_pix ≈ Δl Δb cos(b) for CAR.
-    Matches what you used in other templates.
-    """
-    dl = np.deg2rad(binsz_deg)
-    db = np.deg2rad(binsz_deg)
-    y = np.arange(ny)
-    x_mid = np.full(ny, (nx - 1) / 2.0)
-    _, b_deg = wcs.pixel_to_world_values(x_mid, y)
-    omega_row = dl * db * np.cos(np.deg2rad(b_deg))
-    return omega_row[:, None] * np.ones((1, nx), dtype=float)
-
-def resample_exposure_logE(expo_raw, E_expo_mev, E_tgt_mev):
-    """Interpolate exposure planes onto target energy centers in log(E)."""
-    if expo_raw.shape[0] == len(E_tgt_mev):
-        return expo_raw
-    if E_expo_mev is None:
-        raise RuntimeError("Exposure planes != counts planes and EXPO has no ENERGIES table.")
-
-    order = np.argsort(E_expo_mev)
-    E_expo_mev = E_expo_mev[order]
-    expo_raw = expo_raw[order]
-
-    logEs = np.log(E_expo_mev)
-    logEt = np.log(E_tgt_mev)
-
-    ne, ny, nx = expo_raw.shape
-    flat = expo_raw.reshape(ne, ny * nx)
-
-    idx = np.searchsorted(logEs, logEt)
-    idx = np.clip(idx, 1, ne - 1)
-    i0 = idx - 1
-    i1 = idx
-    w = (logEt - logEs[i0]) / (logEs[i1] - logEs[i0])
-
-    out = np.empty((len(E_tgt_mev), ny * nx), float)
-    for j in range(len(E_tgt_mev)):
-        out[j] = (1 - w[j]) * flat[i0[j]] + w[j] * flat[i1[j]]
-    return out.reshape(len(E_tgt_mev), ny, nx)
 
 
 # --------------------------------------------------

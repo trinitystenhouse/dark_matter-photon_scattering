@@ -12,10 +12,14 @@ Outputs:
 """
 
 import os
+import sys
 import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
 from scipy.interpolate import RegularGridInterpolator
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from totani_helpers.totani_io import pixel_solid_angle_map, read_exposure, resample_exposure_logE
 
 DEG2RAD = np.pi / 180.0
 REPO_DIR = os.environ["REPO_PATH"]
@@ -26,53 +30,16 @@ def read_counts_bins(counts_ccube_path):
     with fits.open(counts_ccube_path) as h:
         hdr = h[0].header
         eb  = h["EBOUNDS"].data
-        emin = np.array(eb["E_MIN"], float)  # MeV
-        emax = np.array(eb["E_MAX"], float)  # MeV
+        emin = np.array(eb["E_MIN"], float)  # keV (for this dataset)
+        emax = np.array(eb["E_MAX"], float)  # keV (for this dataset)
     ectr = np.sqrt(emin * emax)              # MeV
     return hdr, emin, emax, ectr
-
-def read_exposure(expcube_path):
-    with fits.open(expcube_path) as h:
-        expo = h[0].data.astype(float)
-        E = None
-        if "ENERGIES" in h:
-            tab = h["ENERGIES"].data
-            col = tab.columns.names[0]
-            E = np.array(tab[col], float)   # MeV (this is how gtexpcube2 writes it)
-        elif "EBOUNDS" in h:
-            eb = h["EBOUNDS"].data
-            Emin = np.array(eb["E_MIN"], float)
-            Emax = np.array(eb["E_MAX"], float)
-            E = np.sqrt(Emin * Emax)
-    return expo, E
 
 def interp_energy_planes(cube, E_src, E_tgt):
     """Interpolate (NE,ny,nx) cube from E_src->E_tgt in log(E). Energies in MeV."""
     if E_src is None:
         raise RuntimeError("No energy axis available to interpolate.")
-    if cube.shape[0] == len(E_tgt):
-        return cube
-
-    o = np.argsort(E_src)
-    E_src = E_src[o]
-    cube = cube[o].astype(float)
-
-    logEs = np.log(E_src)
-    logEt = np.log(E_tgt)
-
-    ne, ny, nx = cube.shape
-    flat = cube.reshape(ne, ny * nx)
-
-    idx = np.searchsorted(logEs, logEt)
-    idx = np.clip(idx, 1, ne - 1)
-    i0 = idx - 1
-    i1 = idx
-    w = (logEt - logEs[i0]) / (logEs[i1] - logEs[i0])
-
-    out = np.empty((len(E_tgt), ny * nx), float)
-    for j in range(len(E_tgt)):
-        out[j] = (1.0 - w[j]) * flat[i0[j]] + w[j] * flat[i1[j]]
-    return out.reshape(len(E_tgt), ny, nx)
+    return resample_exposure_logE(cube, E_src, E_tgt)
 
 def read_iem(iem_path):
     """Return (cube, WCS_celestial, energies_MeV, header)."""
@@ -81,16 +48,26 @@ def read_iem(iem_path):
         hdr  = h[0].header
         w    = WCS(hdr).celestial
 
+        print("[E] IEM BUNIT:", str(hdr.get("BUNIT", "")))
+
         E = None
         if "ENERGIES" in h:
             tab = h["ENERGIES"].data
             col = tab.columns.names[0]
             E = np.array(tab[col], float)  # MeV
+            print("[E] IEM ENERGIES (as stored):")
+            print("[E]   N:", int(E.size))
+            print("[E]   min/max:", float(np.nanmin(E)), float(np.nanmax(E)))
+            print("[E]   first/last:", float(E[0]), float(E[-1]))
         elif "EBOUNDS" in h:
             eb = h["EBOUNDS"].data
             Emin = np.array(eb["E_MIN"], float)
             Emax = np.array(eb["E_MAX"], float)
             E = np.sqrt(Emin * Emax)
+            print("[E] IEM EBOUNDS (centers, as stored):")
+            print("[E]   N:", int(E.size))
+            print("[E]   min/max:", float(np.nanmin(E)), float(np.nanmax(E)))
+            print("[E]   first/last:", float(E[0]), float(E[-1]))
         else:
             raise RuntimeError("IEM has no ENERGIES/EBOUNDS extension.")
     return cube, w, E, hdr
@@ -145,16 +122,6 @@ def read_isotropic_txt(path):
     o = np.argsort(E)
     return E[o], I[o]
 
-def pixel_solid_angle_map(wcs, ny, nx, binsz_deg):
-    """Match your PS template: Ω_pix ≈ Δl Δb cos(b) for CAR."""
-    dl = np.deg2rad(binsz_deg)
-    db = np.deg2rad(binsz_deg)
-    y = np.arange(ny)
-    x_mid = np.full(ny, (nx - 1) / 2.0)
-    _, b_deg = wcs.pixel_to_world_values(x_mid, y)
-    omega_row = dl * db * np.cos(np.deg2rad(b_deg))
-    return omega_row[:, None] * np.ones((1, nx), float)
-
 def write_cube(path, data, hdr_like, bunit=None):
     hdu = fits.PrimaryHDU(data.astype("f4"), header=hdr_like)
     if bunit is not None:
@@ -186,27 +153,62 @@ def main():
         default=os.path.join(DATA_DIR, "processed", "templates"),
     )
     ap.add_argument("--binsz", type=float, default=0.125)
+    ap.add_argument(
+        "--iem-per-bin",
+        action="store_true",
+        help="Treat IEM cube values as per energy-bin intensity (divide by dE to get per-MeV). Use ONLY if you are sure.",
+    )
+    ap.add_argument(
+        "--iem-assume-per-mev",
+        action="store_true",
+        help="Assume IEM cube is already per-MeV differential intensity even if BUNIT is blank (recommended).",
+    )
+
     args = ap.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    # Target grid + energies from counts cube (MeV)
-    hdr_cnt, Emin, Emax, Ectr = read_counts_bins(args.counts)
+    # Target grid + energies from counts cube
+    hdr_cnt, Emin_raw, Emax_raw, Ectr_raw = read_counts_bins(args.counts)
+
+    # Auto-detect keV vs MeV in counts EBOUNDS
+    # keV typically ~1e6 for 1 GeV; MeV typically ~1e3 for 1 GeV
+    if float(np.nanmedian(Emax_raw)) > 1e6:
+        unit_counts = "keV"
+        Emin = Emin_raw / 1000.0
+        Emax = Emax_raw / 1000.0
+        Ectr = Ectr_raw / 1000.0
+    else:
+        unit_counts = "MeV"
+        Emin = Emin_raw
+        Emax = Emax_raw
+        Ectr = Ectr_raw
+
     nE = len(Ectr)
-    Ectr = Ectr / 1000.0  # Convert to MeV
+
     w_tgt = WCS(hdr_cnt).celestial
     ny, nx = hdr_cnt["NAXIS2"], hdr_cnt["NAXIS1"]
-    dE = (Emax - Emin) /1000 # MeV
+
+    dE = (Emax - Emin)  # MeV
+
+    print(f"[E] counts EBOUNDS assumed in {unit_counts} -> using MeV internally")
+    print("[E]   Ectr_MeV:", np.round(Ectr, 6))
+    print("[E]   Ectr_GeV:", np.round(Ectr / 1000.0, 6))
+    print("[E]   dE_MeV  :", np.round(dE, 6))
+
     omega = pixel_solid_angle_map(w_tgt, ny, nx, args.binsz)  # sr
 
     # Exposure (cm^2 s), interpolate in energy if needed
     expo, E_exp = read_exposure(args.expcube)
+    print("[E] expcube planes (raw):", expo.shape)
     if expo.shape[1:] != (ny, nx):
         raise RuntimeError("Exposure spatial shape does not match counts grid.")
     if expo.shape[0] != nE:
         if E_exp is None:
             raise RuntimeError("Exposure has different #planes and no energy axis.")
         expo = interp_energy_planes(expo, E_exp, Ectr)
+
+    print("[E] expcube planes (on counts E grid):", expo.shape)
 
     # IEM: read, interpolate in energy onto Ectr (MeV), then reproject to counts grid
     iem_cube, w_src, E_iem, hdr_iem = read_iem(args.iem)
@@ -219,14 +221,28 @@ def main():
     # Ensure IEM is in per-MeV units. If not, convert.
     # If BUNIT says it's per sr per cm2 per s but NOT per MeV, treat as per-energy-bin and divide by dE.
     bunit = str(hdr_iem.get("BUNIT", "")).upper()
-    iem_is_per_mev = ("MEV" in bunit and ("-1" in bunit or "MEV-1" in bunit))
-    if not iem_is_per_mev:
-        # safest fallback: assume it is per-bin intensity and convert to per-MeV
+    print("[E] IEM BUNIT (raw):", repr(hdr_iem.get("BUNIT", "")))
+
+    # If BUNIT explicitly indicates per-MeV, do nothing.
+    # If BUNIT is blank/unknown, DO NOT divide by dE unless user explicitly requests --iem-per-bin.
+    iem_explicit_per_mev = ("MEV" in bunit) and ("-1" in bunit or "MEV-1" in bunit or "MEV^-1" in bunit)
+
+    if args.iem_per_bin:
+        print("[E] IEM: forcing per-bin -> dividing by dE to get per-MeV.")
         iem_on_grid = iem_on_grid / dE[:, None, None]
+    else:
+        # Recommended: assume per-MeV when BUNIT is blank/unknown
+        if (not iem_explicit_per_mev) and (not args.iem_assume_per_mev):
+            print("[W] IEM BUNIT does not confirm per-MeV and you did not pass --iem-assume-per-mev.")
+            print("[W] Leaving IEM unchanged (NOT dividing by dE). If you know it's per-bin, rerun with --iem-per-bin.")
+        else:
+            print("[E] IEM: treating as per-MeV (no dE division).")
 
     # Isotropic: spectrum -> intensity at Ectr (MeV) using log-log interpolation
     E_iso, I_iso = read_isotropic_txt(args.iso)
-    I_ctr = np.interp(np.log(Ectr), np.log(E_iso), I_iso)  # per MeV
+    # log-log interpolation (power-law-ish spectra)
+    m = (E_iso > 0) & (I_iso > 0)
+    I_ctr = np.exp(np.interp(np.log(Ectr), np.log(E_iso[m]), np.log(I_iso[m])))
     iso_on_grid = I_ctr[:, None, None] * np.ones((nE, ny, nx), float)
 
     # Now we have dN/dE cubes in the SAME units as your PS dnde template:
