@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from astropy.io import fits
 from astropy.wcs import WCS
+import re
 
 from check_component import run_component_check
 from totani_helpers.totani_io import (
@@ -63,19 +64,17 @@ def _save_Irec_map(out_png, Irec, mask, title):
     fig.savefig(out_png, dpi=200)
     plt.close(fig)
 
-
+REPO_DIR = os.environ["REPO_PATH"]
+DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
 def main():
-    repo_dir = os.environ.get("REPO_PATH")
-    if repo_dir is None:
-        raise SystemExit("REPO_PATH not set")
+    counts = os.path.join(DATA_DIR, "processed", "counts_ccube_1000to1000000.fits")
+    templates_dir = os.path.join(DATA_DIR, "processed", "templates")
 
-    data_dir = os.path.join(repo_dir, "fermi_data", "totani")
-    counts = os.path.join(data_dir, "processed", "counts_ccube_1000to1000000.fits")
-
-    # Prefer the Totani SCA-derived vertices product if present.
+    # Prefer the new binary-flat product, then fall back to older ones.
     candidates = [
-        os.path.join(data_dir, "processed", "templates", "mu_bubbles_vertices_sca_full_counts.fits"),
-        os.path.join(data_dir, "processed", "templates", "mu_bubbles_flat_counts.fits"),
+        os.path.join(templates_dir, "mu_bubbles_flat_binary_counts.fits"),
+        os.path.join(templates_dir, "mu_bubbles_vertices_sca_full_counts.fits"),
+        os.path.join(templates_dir, "mu_bubbles_flat_counts.fits"),
     ]
     template = None
     for p in candidates:
@@ -99,13 +98,23 @@ def main():
     )
 
     # --- FB-specific intensity reconstruction, split North/South ---
-    expo_path = os.path.join(data_dir, "processed", "expcube_1000to1000000.fits")
+    expo_path = os.path.join(DATA_DIR, "processed", "expcube_1000to1000000.fits")
 
-    # Pick a mask file that matches the chosen template flavour
-    if os.path.basename(template).startswith("mu_bubbles_vertices_sca"):
-        mask_path = os.path.join(data_dir, "processed", "templates", "bubbles_vertices_sca_full_mask.fits")
-    else:
-        mask_path = os.path.join(data_dir, "processed", "templates", "bubbles_vertices_flat_full_mask.fits")
+    # Prefer a mask derived from the mu filename: mu_<prefix>_counts.fits -> <prefix>_mask.fits
+    mask_path = None
+    m = re.match(r"^mu_(?P<prefix>.+)_counts\\.fits$", os.path.basename(template))
+    if m is not None:
+        prefix = m.group("prefix")
+        cand = os.path.join(templates_dir, f"{prefix}_mask.fits")
+        if os.path.exists(cand):
+            mask_path = cand
+
+    # Fall back to legacy mask naming based on template flavour
+    if mask_path is None:
+        if os.path.basename(template).startswith("mu_bubbles_vertices_sca"):
+            mask_path = os.path.join(templates_dir, "bubbles_vertices_sca_full_mask.fits")
+        else:
+            mask_path = os.path.join(templates_dir, "bubbles_vertices_flat_full_mask.fits")
 
     if not os.path.exists(mask_path):
         raise SystemExit(f"Bubbles mask file not found: {mask_path}")

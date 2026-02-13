@@ -309,10 +309,9 @@ def resolve_templates(template_dir):
     ])
 
     spec["NFW"] = pick_existing(template_dir, [
-        "mu_nfw_counts.fits",
-        "mu_nfw.fits",
-        "nfw_dnde.fits",
-        "nfw_E2dnde.fits",
+        "mu_nfw_rho2.5_g1.25_counts.fits",
+        "nfw_rho2.5_g1.25_dnde.fits",
+        "nfw_rho2.5_g1.25_E2dnde.fits",
     ])
 
     spec["LOOPI"] = pick_existing(template_dir, [
@@ -335,9 +334,9 @@ def resolve_templates(template_dir):
     ])
 
     spec["FB_FLAT"] = pick_existing(template_dir, [
-        "mu_bubbles_userpoly_full_counts.fits",
-        "bubbles_userpoly_full_dnde.fits",
-        "bubbles_userpoly_full_E2dnde.fits",
+        "mu_bubbles_flat_binary_counts.fits",
+        "bubbles_flat_binary_dnde.fits",
+        "bubbles_flat_binary_E2dnde.fits",
     ])
 
     missing = [k for k, v in spec.items() if v is None]

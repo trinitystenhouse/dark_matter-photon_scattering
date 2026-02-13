@@ -20,14 +20,16 @@ fit), consistent with Totani's treatment of energy-independent morphologies.
 
 import argparse
 import os
-import sys
 
 import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from totani_helpers.totani_io import pixel_solid_angle_map, resample_exposure_logE
+from totani_helpers.totani_io import (
+    pixel_solid_angle_map,
+    read_expcube_energies_mev,
+    resample_exposure_logE_interp,
+)
 
 REPO_DIR = os.environ["REPO_PATH"]
 DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
@@ -139,25 +141,21 @@ def main():
 
     # --- exposure (cm^2 s), resample if needed ---
     with fits.open(args.expcube) as h:
-        expo_raw = h[0].data.astype(float)
-        E_expo_mev = None
-        if "ENERGIES" in h:
-            col0 = h["ENERGIES"].columns.names[0]
-            E_expo_mev = np.array(h["ENERGIES"].data[col0], dtype=float)
-            print("[E] expcube ENERGIES (as stored, assumed MeV):")
-            print("[E]   N:", int(E_expo_mev.size))
-            print("[E]   min/max:", float(np.nanmin(E_expo_mev)), float(np.nanmax(E_expo_mev)))
-            print("[E]   first/last:", float(E_expo_mev[0]), float(E_expo_mev[-1]))
-        else:
-            print("[E] expcube has no ENERGIES extension")
+        expo_raw = np.array(h[0].data, dtype=np.float64)
+        E_expo_mev = read_expcube_energies_mev(h)
+        print("[E] expcube ENERGIES (MeV, canonical reader):")
+        print("[E]   N:", int(E_expo_mev.size))
+        print("[E]   min/max:", float(np.nanmin(E_expo_mev)), float(np.nanmax(E_expo_mev)))
+        print("[E]   first/last:", float(E_expo_mev[0]), float(E_expo_mev[-1]))
 
     print("[E] expcube planes (raw):", expo_raw.shape)
 
-    expo = resample_exposure_logE(expo_raw, E_expo_mev, Ectr_mev)
+    expo = resample_exposure_logE_interp(expo_raw, E_expo_mev, Ectr_mev)
     if expo.shape != (nE, ny, nx):
         raise RuntimeError(f"Exposure shape {expo.shape} not compatible with {(nE, ny, nx)}")
 
     print("[E] expcube planes (resampled):", expo.shape)
+    print("[DBG] expo used per-bin sum:", np.nansum(expo, axis=(1,2)))
 
     # --- lon/lat, omega ---
     yy, xx = np.mgrid[:ny, :nx]
