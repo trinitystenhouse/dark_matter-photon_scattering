@@ -25,7 +25,7 @@ import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from make_nfw_rho25 import make_nfw_template, make_nfw_rho25_template
+from make_nfw import make_nfw_template, make_nfw_rho25_template
 from totani_helpers.totani_io import (
     pixel_solid_angle_map,
     read_expcube_energies_mev,
