@@ -35,7 +35,12 @@ def interp_energy_planes(cube, E_src, E_tgt):
 def reproject_plane_to_target(src_plane, w_src, w_tgt, ny_tgt, nx_tgt):
     yy, xx = np.mgrid[0:ny_tgt, 0:nx_tgt]
     lon, lat = w_tgt.pixel_to_world_values(xx, yy)
-    xs, ys = w_src.world_to_pixel_values(lon, lat)
+    # Some inputs use different longitude conventions (e.g. [-180,180] vs [0,360]).
+    # If we don't handle wrap-around, the l=0/360 seam can fall slightly outside the
+    # source WCS bounds and the interpolator will return NaNs for an entire column.
+    xs0, ys0 = w_src.world_to_pixel_values(lon, lat)
+    xs_p, ys_p = w_src.world_to_pixel_values(lon + 360.0, lat)
+    xs_m, ys_m = w_src.world_to_pixel_values(lon - 360.0, lat)
 
     ny, nx = src_plane.shape
     y = np.arange(ny, dtype=float)
@@ -48,8 +53,41 @@ def reproject_plane_to_target(src_plane, w_src, w_tgt, ny_tgt, nx_tgt):
         bounds_error=False,
         fill_value=np.nan,
     )
-    pts = np.vstack([ys.ravel(), xs.ravel()]).T
-    return interp(pts).reshape(ny_tgt, nx_tgt)
+    def _eval(xs, ys):
+        pts = np.vstack([ys.ravel(), xs.ravel()]).T
+        return interp(pts).reshape(ny_tgt, nx_tgt)
+
+    out = _eval(xs0, ys0)
+    bad = ~np.isfinite(out)
+    if np.any(bad):
+        out_p = _eval(xs_p, ys_p)
+        fill = bad & np.isfinite(out_p)
+        out[fill] = out_p[fill]
+        bad = ~np.isfinite(out)
+    if np.any(bad):
+        out_m = _eval(xs_m, ys_m)
+        fill = bad & np.isfinite(out_m)
+        out[fill] = out_m[fill]
+        bad = ~np.isfinite(out)
+
+    # Last-resort seam stitch: if any NaNs remain, fill along longitude from nearest
+    # finite neighbor (keeps reprojection from creating entire NaN columns).
+    if np.any(bad):
+        out2 = np.array(out, copy=True)
+        for j in range(nx_tgt):
+            col = out2[:, j]
+            if np.all(~np.isfinite(col)):
+                jl = (j - 1) % nx_tgt
+                jr = (j + 1) % nx_tgt
+                col_l = out2[:, jl]
+                col_r = out2[:, jr]
+                if np.any(np.isfinite(col_l)):
+                    out2[:, j] = col_l
+                elif np.any(np.isfinite(col_r)):
+                    out2[:, j] = col_r
+        out = out2
+
+    return out
 
 
 def reproject_cube_to_target(src_cube, w_src, w_tgt, ny_tgt, nx_tgt):
