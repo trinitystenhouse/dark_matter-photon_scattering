@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 
 import os
-import sys
 
 import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
 from scipy.optimize import nnls
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from totani_helpers.totani_io import (
     lonlat_grids,
     pixel_solid_angle_map,
     read_counts_and_ebounds,
-    read_exposure,
-    resample_exposure_logE,
+    read_expcube_energies_mev,
+    resample_exposure_logE_interp,
 )
 
 REPO_DIR = os.environ["REPO_PATH"]
@@ -83,6 +81,13 @@ def main():
     ap.add_argument("--disk-cut", type=float, default=10.0)
     ap.add_argument("--binsz", type=float, default=0.125)
 
+    ap.add_argument(
+        "--ref-gev",
+        type=float,
+        default=4.3,
+        help="Reference energy (GeV) used to construct FB_POS/FB_NEG from the bubbles image",
+    )
+
     ap.add_argument("--include-nfw", action="store_true")
     ap.add_argument("--include-loopi", action="store_true")
 
@@ -94,12 +99,14 @@ def main():
     nE, ny, nx = counts.shape
     wcs = WCS(hdr).celestial
 
-    expo_raw, E_expo = read_exposure(args.expcube)
-    expo = resample_exposure_logE(expo_raw, E_expo, Ectr_mev)
+    with fits.open(args.expcube) as he:
+        expo_raw = np.array(he[0].data, dtype=np.float64)
+        E_expo = read_expcube_energies_mev(he)
+    expo = resample_exposure_logE_interp(expo_raw, E_expo, Ectr_mev)
     if expo.shape != counts.shape:
         raise RuntimeError("Exposure shape mismatch after resampling")
 
-    omega = pixel_solid_angle_map(wcs, ny, nx, args.binsz)
+    omega = pixel_solid_angle_map(wcs, ny, nx, binsz_deg=float(args.binsz))
     lon_w, lat = lonlat_grids(wcs, ny, nx)
 
     roi2d = (np.abs(lon_w) <= args.roi_lon) & (np.abs(lat) <= args.roi_lat)
@@ -111,6 +118,20 @@ def main():
     mu_ics = _read_cube(os.path.join(templates_dir, "mu_ics_counts.fits"), counts.shape)
     mu_iso = _read_cube(os.path.join(templates_dir, "mu_iso_counts.fits"), counts.shape)
     mu_ps = _read_cube(os.path.join(templates_dir, "mu_ps_counts.fits"), counts.shape)
+
+    # Flat bubbles template used in the baseline fit to build the bubbles image.
+    mu_flat = None
+    for name in (
+        "mu_bubbles_flat_binary_counts.fits",
+        "mu_bubbles_vertices_sca_full_counts.fits",
+        "mu_bubbles_flat_counts.fits",
+    ):
+        p = os.path.join(templates_dir, name)
+        if os.path.exists(p):
+            mu_flat = _read_cube(p, counts.shape)
+            break
+    if mu_flat is None:
+        raise RuntimeError("No flat bubbles mu template found (need mu_bubbles_flat_binary_counts.fits or legacy)")
 
     mu_nfw = None
     if args.include_nfw:
@@ -146,45 +167,71 @@ def main():
             raise RuntimeError("bubble-mask must be (ny,nx)")
         bubble2d = bm
 
-    resid_dnde = np.full_like(counts, np.nan, dtype=float)
+    # ---- Totani-style construction from a single reference energy bin ----
+    Ectr_gev = Ectr_mev / 1000.0
+    k_ref = int(np.argmin(np.abs(Ectr_gev - float(args.ref_gev))))
+    print(f"[FB_POSNEG] using reference bin k_ref={k_ref} (Ectr={Ectr_gev[k_ref]:.6g} GeV)")
 
+    mask2d = roi2d & disk2d & ext_keep3d[k_ref] & ps_keep3d[k_ref]
+    if bubble2d is not None:
+        mask2d = mask2d & bubble2d
+
+    denom = expo[k_ref] * omega * dE_mev[k_ref]
+    good = mask2d & np.isfinite(denom) & (denom > 0) & np.isfinite(counts[k_ref])
+
+    # Baseline components including FLAT bubbles.
+    comps = [mu_gas[k_ref], mu_ics[k_ref], mu_iso[k_ref], mu_ps[k_ref]]
+    if mu_nfw is not None:
+        comps.append(mu_nfw[k_ref])
+    if mu_loopi is not None:
+        comps.append(mu_loopi[k_ref])
+    comps.append(mu_flat[k_ref])
+    i_flat = len(comps) - 1
+
+    A = fit_bin_weighted_nnls(counts[k_ref], comps, good, eps=1.0)
+
+    model = np.zeros((ny, nx), dtype=float)
+    for a, mu in zip(A, comps):
+        model += a * mu
+
+    resid_counts = counts[k_ref] - model
+
+    # Bubbles image counts = (best-fit flat bubbles counts) + residual counts
+    bubbles_img_counts = (A[i_flat] * mu_flat[k_ref]) + resid_counts
+
+    bubbles_img_flux = np.full((ny, nx), np.nan, dtype=float)
+    bubbles_img_flux[good] = bubbles_img_counts[good] / denom[good]
+
+    pos_flux = np.where(np.isfinite(bubbles_img_flux) & (bubbles_img_flux > 0), bubbles_img_flux, 0.0)
+    neg_flux = np.where(np.isfinite(bubbles_img_flux) & (bubbles_img_flux < 0), -bubbles_img_flux, 0.0)
+
+    # Energy-independent spatial templates (normalised) derived from the reference map.
+    spatial_pos = np.zeros((ny, nx), dtype=float)
+    spatial_neg = np.zeros((ny, nx), dtype=float)
+    spatial_pos[good] = pos_flux[good]
+    spatial_neg[good] = neg_flux[good]
+
+    s_pos = float(np.nansum(spatial_pos[good]))
+    s_neg = float(np.nansum(spatial_neg[good]))
+    if not np.isfinite(s_pos) or s_pos <= 0:
+        raise RuntimeError("FB_POS normalisation failed (no positive pixels in bubbles image)")
+    if not np.isfinite(s_neg) or s_neg <= 0:
+        raise RuntimeError("FB_NEG normalisation failed (no negative pixels in bubbles image)")
+    spatial_pos /= s_pos
+    spatial_neg /= s_neg
+
+    # Build dnde/mu products for all energies using standard form.
+    pos_dnde = np.empty((nE, ny, nx), dtype=float)
+    neg_dnde = np.empty((nE, ny, nx), dtype=float)
     for k in range(nE):
-        mask2d = roi2d & disk2d & ext_keep3d[k] & ps_keep3d[k]
-        if bubble2d is not None:
-            mask2d = mask2d & bubble2d
-
-        denom = expo[k] * omega * dE_mev[k]
-        good = mask2d & np.isfinite(denom) & (denom > 0) & np.isfinite(counts[k])
-
-        comps = [mu_gas[k], mu_ics[k], mu_iso[k], mu_ps[k]]
-        if mu_nfw is not None:
-            comps.append(mu_nfw[k])
-        if mu_loopi is not None:
-            comps.append(mu_loopi[k])
-
-        A = fit_bin_weighted_nnls(counts[k], comps, good, eps=1.0)
-
-        model = np.zeros((ny, nx), dtype=float)
-        for a, mu in zip(A, comps):
-            model += a * mu
-
-        resid_counts = counts[k] - model
-
-        out = np.full((ny, nx), np.nan, dtype=float)
-        out[good] = resid_counts[good] / denom[good]
-        resid_dnde[k] = out
-
-    pos_dnde = np.where(np.isfinite(resid_dnde) & (resid_dnde > 0), resid_dnde, 0.0)
-    neg_dnde = np.where(np.isfinite(resid_dnde) & (resid_dnde < 0), -resid_dnde, 0.0)
+        pos_dnde[k] = spatial_pos / (omega * dE_mev[k])
+        neg_dnde[k] = spatial_neg / (omega * dE_mev[k])
 
     pos_E2 = pos_dnde * (Ectr_mev[:, None, None] ** 2)
     neg_E2 = neg_dnde * (Ectr_mev[:, None, None] ** 2)
 
     pos_mu = pos_dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
     neg_mu = neg_dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
-
-    print(pos_mu)
-    print(neg_mu)
 
     out_pos_dnde = os.path.join(args.outdir_data, "bubbles_pos_dnde.fits")
     out_neg_dnde = os.path.join(args.outdir_data, "bubbles_neg_dnde.fits")
