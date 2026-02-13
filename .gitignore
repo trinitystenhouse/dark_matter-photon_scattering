@@ -15,3 +15,4 @@ paper_check_helpers.egg-info
 __pycache__
 .DS_Store
 Totani_paper_check/make_templates/debug_plots
+Totani_paper_check/check_templates/plots_check_*
