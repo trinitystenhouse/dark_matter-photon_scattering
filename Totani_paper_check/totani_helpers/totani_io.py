@@ -39,33 +39,76 @@ def read_exposure(expo_path):
             E_expo = np.sqrt(Emin * Emax)
     return expo, E_expo
 
+def read_expcube_energies_mev(hdul):
+    """
+    Read exposure cube energies and return a 1D array in MeV.
+
+    Requires an ENERGIES extension (preferred). If you ever encounter an expcube without it,
+    fail loudly rather than guessing.
+    """
+    if "ENERGIES" not in hdul:
+        raise RuntimeError("Exposure cube missing ENERGIES extension; can't resample exposure vs energy.")
+    col0 = hdul["ENERGIES"].columns.names[0]
+    E = np.array(hdul["ENERGIES"].data[col0], dtype=float)
+
+    # Sanity: for your pipeline, MeV scale is ~1e3..1e6.
+    # If clearly keV-scale, convert.
+    if np.nanmax(E) > 1e8 and np.nanmin(E) > 1e5:
+        E = E / 1000.0
+
+    if not np.all(np.isfinite(E)) or np.any(E <= 0):
+        raise RuntimeError("Invalid ENERGIES values in exposure cube (non-finite or non-positive).")
+    return E
+
+
+def resample_exposure_logE_interp(expo_raw, E_expo_mev, E_target_mev):
+    """Interpolate exposure planes in log(E), clamped to endpoint energies."""
+    expo_raw = np.asarray(expo_raw, dtype=np.float64)
+    E_expo_mev = np.asarray(E_expo_mev, dtype=np.float64)
+    E_target_mev = np.asarray(E_target_mev, dtype=np.float64)
+
+    if expo_raw.ndim != 3:
+        raise ValueError("expo_raw must be a 3D array (nE, ny, nx)")
+    if expo_raw.shape[0] != E_expo_mev.size:
+        raise ValueError("expo_raw first axis must match E_expo_mev size")
+    if np.any(E_expo_mev <= 0) or np.any(E_target_mev <= 0):
+        raise ValueError("E_expo_mev and E_target_mev must be positive")
+
+    logE = np.log(E_expo_mev)
+    logEt = np.log(E_target_mev)
+
+    # Ensure increasing energy
+    order = np.argsort(logE)
+    logE = logE[order]
+    expo_raw = expo_raw[order]
+
+    # Clamp targets (no extrapolation)
+    logEt = np.clip(logEt, logE[0], logE[-1])
+
+    # Bracket indices
+    idx_hi = np.searchsorted(logE, logEt, side="left")
+    idx_hi = np.clip(idx_hi, 1, len(logE) - 1)
+    idx_lo = idx_hi - 1
+
+    x0 = logE[idx_lo]
+    x1 = logE[idx_hi]
+    w = (logEt - x0) / (x1 - x0 + 1e-300)
+
+    return (1.0 - w)[:, None, None] * expo_raw[idx_lo] + w[:, None, None] * expo_raw[idx_hi]
+
 
 def resample_exposure_logE(expo_raw, E_expo_mev, E_tgt_mev):
+    """
+    Backward-compatible wrapper.
+    - If expo already has the right number of energy planes, return as-is.
+    - Otherwise require E_expo_mev and use logE interpolation.
+    """
+    expo_raw = np.asarray(expo_raw)
     if expo_raw.shape[0] == len(E_tgt_mev):
         return expo_raw
     if E_expo_mev is None:
-        raise RuntimeError("Exposure planes != counts planes and EXPO has no ENERGIES/EBOUNDS table.")
-
-    order = np.argsort(E_expo_mev)
-    E_expo_mev = np.asarray(E_expo_mev, dtype=float)[order]
-    expo_raw = np.asarray(expo_raw, dtype=float)[order]
-
-    logEs = np.log(E_expo_mev)
-    logEt = np.log(np.asarray(E_tgt_mev, dtype=float))
-
-    ne, ny, nx = expo_raw.shape
-    flat = expo_raw.reshape(ne, ny * nx)
-
-    idx = np.searchsorted(logEs, logEt)
-    idx = np.clip(idx, 1, ne - 1)
-    i0 = idx - 1
-    i1 = idx
-    w = (logEt - logEs[i0]) / (logEs[i1] - logEs[i0])
-
-    out = np.empty((len(E_tgt_mev), ny * nx), float)
-    for j in range(len(E_tgt_mev)):
-        out[j] = (1 - w[j]) * flat[i0[j]] + w[j] * flat[i1[j]]
-    return out.reshape(len(E_tgt_mev), ny, nx)
+        raise RuntimeError("Exposure planes != target planes and exposure cube has no ENERGIES table.")
+    return resample_exposure_logE_interp(expo_raw, E_expo_mev, E_tgt_mev)
 
 
 def pixel_solid_angle_map(wcs, ny, nx, binsz_deg):

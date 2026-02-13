@@ -1,190 +1,215 @@
 #!/usr/bin/env python3
 """
-Build an NFW (rho^2.5) template on the counts CCUBE grid.
+Build an NFW (rho^p) template on the counts CCUBE grid.
 
 Outputs (same conventions as your PS template):
-  - nfw_dnde.fits     : dN/dE  [ph cm^-2 s^-1 sr^-1 MeV^-1]
-  - nfw_E2dnde.fits   : E^2 dN/dE [MeV cm^-2 s^-1 sr^-1]
-  - mu_nfw_counts.fits: expected counts per bin per pixel [counts]
+  - nfw*_dnde.fits      : dN/dE  [ph cm^-2 s^-1 sr^-1 MeV^-1]
+  - nfw*_E2dnde.fits    : E^2 dN/dE [MeV cm^-2 s^-1 sr^-1]
+  - mu_nfw*_counts.fits : expected counts per bin per pixel [counts]
+
+Key fix vs your previous version:
+  ✅ Exposure resampling is now deterministic and explicit: linear interpolation in log(E),
+     clamped to the exposure energy range, evaluated at CCUBE bin CENTERS by default.
+  ✅ (Optional) You can switch to edge-mean exposure per bin (mean of expo(Emin), expo(Emax))
+     which sometimes matches older pipelines.
 
 Notes:
-- The spatial template is normalised so sum over ROI pixels = 1.
-- The spectrum is unit-normalised over bins (sum_k Phi_bin = 1 ph/cm^2/s).
-  Your fit coefficient then becomes the physical total flux amplitude.
+- Spatial template is normalised so sum over ROI pixels = 1 (pixel-sum, as you had).
+- Spectrum is unit-normalised over bins (sum_k Phi_bin = 1 ph/cm^2/s).
+  Fit coefficient then corresponds to integrated flux over the energy range.
 """
 
 import os
-import sys
+import argparse
 import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
-from scipy.ndimage import gaussian_filter
-from make_nfw_rho25 import make_nfw_rho25_template
 
-# -------------------------
-# Paths
-# -------------------------
-REPO_DIR = os.environ["REPO_PATH"]
-DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from totani_helpers.totani_io import pixel_solid_angle_map, resample_exposure_logE
-COUNTS = os.path.join(DATA_DIR, "processed", "counts_ccube_1000to1000000.fits")
-EXPO = os.path.join(DATA_DIR, "processed", "expcube_1000to1000000.fits")
-OUTDIR = os.path.join(DATA_DIR, "processed", "templates")
-
-os.makedirs(OUTDIR, exist_ok=True)
-OUT_DNDE   = os.path.join(OUTDIR, "nfw_dnde.fits")
-OUT_E2DNDE = os.path.join(OUTDIR, "nfw_E2dnde.fits")
-OUT_MU     = os.path.join(OUTDIR, "mu_nfw_counts.fits")
-
-# -------------------------
-# Settings
-# -------------------------
-BINSZ_DEG = 0.125
-ROI_LON_DEG = 60.0
-ROI_LAT_DEG = 60.0
-
-# spectral normalisation: flat Phi_bin then renormalise (unit total flux)
-SPECTRUM = "flat"  # placeholder; keep flat for now
+from make_nfw_rho25 import make_nfw_template, make_nfw_rho25_template
+from totani_helpers.totani_io import (
+    pixel_solid_angle_map,
+    read_expcube_energies_mev,
+    resample_exposure_logE_interp,
+)
 
 
-# -------------------------
-# Read counts binning (authoritative)
-# -------------------------
-with fits.open(COUNTS) as h:
-    hdr = h[0].header
-    eb  = h["EBOUNDS"].data
-    # Debug: print energy binning as stored in the counts cube
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--counts", default=None, help="Counts CCUBE (authoritative WCS + EBOUNDS)")
+    ap.add_argument("--expo", default=None, help="Exposure cube (expcube)")
+    ap.add_argument("--outdir", default=None)
 
-Emin_kev = eb["E_MIN"].astype(float)
-Emax_kev = eb["E_MAX"].astype(float)
-Ectr_kev = np.sqrt(Emin_kev * Emax_kev)
+    ap.add_argument("--binsz", type=float, default=0.125)
+    ap.add_argument("--roi-lon", type=float, default=60.0)
+    ap.add_argument("--roi-lat", type=float, default=60.0)
 
-Emin_mev = Emin_kev / 1000.0
-Emax_mev = Emax_kev / 1000.0
-dE_mev   = (Emax_mev - Emin_mev)
-Ectr_mev = np.sqrt(Emin_mev * Emax_mev)
+    ap.add_argument("--halo-gamma", type=float, default=1.25)
+    ap.add_argument("--rho-power", type=float, default=2.5)
+    ap.add_argument("--n-s", type=int, default=512)
+    ap.add_argument("--chunk", type=int, default=8)
 
-print("[E] counts EBOUNDS:")
-print("[E]   Emin_keV:", np.round(Emin_kev, 3))
-print("[E]   Emax_keV:", np.round(Emax_kev, 3))
-print("[E]   Ectr_keV:", np.round(Ectr_kev, 3))
-print("[E]   Emin_MeV:", np.round(Emin_mev, 6))
-print("[E]   Emax_MeV:", np.round(Emax_mev, 6))
-print("[E]   Ectr_MeV:", np.round(Ectr_mev, 6))
-print("[E]   Ectr_GeV:", np.round(Ectr_mev / 1000.0, 6))
-print("[E]   dE_MeV  :", np.round(dE_mev, 6))
+    ap.add_argument(
+        "--expo-sampling",
+        choices=["center", "edge-mean"],
+        default="center",
+        help="How to evaluate exposure per CCUBE bin: at bin center, or mean of exposure at (Emin,Emax).",
+    )
+    args = ap.parse_args()
 
-nE = len(Ectr_mev)
+    repo_dir = os.environ["REPO_PATH"]
+    data_dir = os.path.join(repo_dir, "fermi_data", "totani")
 
-# WCS + spatial shape comes from counts header
-wcs = WCS(hdr).celestial
-ny, nx = hdr["NAXIS2"], hdr["NAXIS1"]
+    counts = args.counts or os.path.join(data_dir, "processed", "counts_ccube_1000to1000000.fits")
+    expo_path = args.expo or os.path.join(data_dir, "processed", "expcube_1000to1000000.fits")
+    outdir = args.outdir or os.path.join(data_dir, "processed", "templates")
+    os.makedirs(outdir, exist_ok=True)
 
-# -------------------------
-# Read exposure, resample if needed
-# -------------------------
-with fits.open(EXPO) as h:
-    expo_raw = h[0].data.astype(float)
-    E_expo_mev = None
-    if "ENERGIES" in h:
-        col0 = h["ENERGIES"].columns.names[0]
-        E_expo_mev = np.array(h["ENERGIES"].data[col0], dtype=float)  # MeV
-        print("[E] expcube ENERGIES (as stored, assumed MeV):")
-        print("[E]   N:", int(E_expo_mev.size))
-        print("[E]   min/max:", float(np.nanmin(E_expo_mev)), float(np.nanmax(E_expo_mev)))
-        print("[E]   first/last:", float(E_expo_mev[0]), float(E_expo_mev[-1]))
+    suffix = f"_rho{args.rho_power:g}_g{args.halo_gamma:g}"
+    if args.expo_sampling != "center":
+        suffix += f"_expo{args.expo_sampling}"
+
+    out_dnde = os.path.join(outdir, f"nfw{suffix}_dnde.fits")
+    out_e2dnde = os.path.join(outdir, f"nfw{suffix}_E2dnde.fits")
+    out_mu = os.path.join(outdir, f"mu_nfw{suffix}_counts.fits")
+
+    # --- Read CCUBE header + EBOUNDS (authoritative energy binning) ---
+    with fits.open(counts) as hc:
+        hdr = hc[0].header
+        wcs = WCS(hdr).celestial
+        ny, nx = hdr["NAXIS2"], hdr["NAXIS1"]
+
+        if "EBOUNDS" not in hc:
+            raise RuntimeError("Counts CCUBE missing EBOUNDS extension.")
+        eb = hc["EBOUNDS"].data
+        eb_hdu = hc["EBOUNDS"].copy()  # we'll copy into outputs for convenience
+
+    Emin_kev = np.array(eb["E_MIN"], dtype=float)
+    Emax_kev = np.array(eb["E_MAX"], dtype=float)
+
+    Emin_mev = Emin_kev / 1000.0
+    Emax_mev = Emax_kev / 1000.0
+    dE_mev = (Emax_mev - Emin_mev)
+    Ectr_mev = np.sqrt(Emin_mev * Emax_mev)
+    nE = int(Ectr_mev.size)
+
+    # --- Read exposure cube + energies, resample to CCUBE binning ---
+    with fits.open(expo_path) as he:
+        expo_raw = np.array(he[0].data, dtype=np.float64)
+        E_expo_mev = read_expcube_energies_mev(he)
+
+    if expo_raw.shape[1:] != (ny, nx):
+        raise RuntimeError(f"Exposure spatial shape {expo_raw.shape[1:]} != counts {(ny, nx)}")
+
+    if args.expo_sampling == "center":
+        expo = resample_exposure_logE_interp(expo_raw, E_expo_mev, Ectr_mev)
+        expo_comment = "Exposure evaluated at CCUBE bin centers Ectr, interpolated linearly in logE (clamped)."
     else:
-        print("[E] expcube has no ENERGIES extension")
+        expo_min = resample_exposure_logE_interp(expo_raw, E_expo_mev, Emin_mev)
+        expo_max = resample_exposure_logE_interp(expo_raw, E_expo_mev, Emax_mev)
+        expo = 0.5 * (expo_min + expo_max)
+        expo_comment = "Exposure = 0.5*(expo(Emin)+expo(Emax)), each interpolated linearly in logE (clamped)."
 
-print("[E] expcube planes (raw):", expo_raw.shape)
+    if expo.shape[0] != nE:
+        raise RuntimeError(f"Resampled exposure has {expo.shape[0]} planes, expected {nE}")
 
-if expo_raw.shape[1:] != (ny, nx):
-    raise RuntimeError(f"Exposure spatial shape {expo_raw.shape[1:]} != counts {(ny, nx)}")
+    # DEBUG: save the resampled exposure used to build mu
+    out_expo_used = os.path.join(outdir, f"expo_used{suffix}.npy")
+    np.save(out_expo_used, expo.astype(np.float32))
+    print("✓ wrote", out_expo_used, "(resampled exposure used in mu)")
+    print("[DBG] expo used per-bin sum:", np.nansum(expo, axis=(1,2)))
 
-expo = resample_exposure_logE(expo_raw, E_expo_mev, Ectr_mev)
-if expo.shape[0] != nE:
-    raise RuntimeError(f"Exposure after resampling has {expo.shape[0]} planes, expected {nE}")
 
-print("[E] expcube planes (resampled):", expo.shape)
+    # --- lon/lat grid ---
+    yy, xx = np.mgrid[:ny, :nx]
+    lon, lat = wcs.pixel_to_world_values(xx, yy)
+    lon = ((lon + 180.0) % 360.0) - 180.0
 
-# -------------------------
-# Build lon/lat grid
-# -------------------------
-yy, xx = np.mgrid[:ny, :nx]
-lon, lat = wcs.pixel_to_world_values(xx, yy)
+    # --- spatial template ---
+    if (args.rho_power == 2.5) and (args.halo_gamma == 1.25):
+        nfw_spatial = make_nfw_rho25_template(lon, lat).astype(float)
+    else:
+        nfw_spatial = make_nfw_template(
+            lon,
+            lat,
+            gamma=args.halo_gamma,
+            rho_power=args.rho_power,
+            n_s=args.n_s,
+            chunk=args.chunk,
+        ).astype(float)
 
-# Wrap lon to [-180,180) for consistent ROI definition
-lon = ((lon + 180.0) % 360.0) - 180.0
+    roi = (np.abs(lon) <= args.roi_lon) & (np.abs(lat) <= args.roi_lat)
+    nfw_spatial[~roi] = 0.0
 
-# -------------------------
-# NFW spatial template + ROI + normalisation
-# -------------------------
-nfw_spatial = make_nfw_rho25_template(lon, lat).astype(float)
+    norm = np.nansum(nfw_spatial)
+    if not np.isfinite(norm) or norm <= 0:
+        raise RuntimeError("NFW template is zero everywhere in ROI")
+    nfw_spatial /= norm
 
-roi = (np.abs(lon) <= ROI_LON_DEG) & (np.abs(lat) <= ROI_LAT_DEG)
-nfw_spatial[~roi] = 0.0
+    # --- solid angle map (must match your fitter conventions) ---
+    omega = pixel_solid_angle_map(wcs, ny, nx, args.binsz)
 
-norm = np.nansum(nfw_spatial)
-if not np.isfinite(norm) or norm <= 0:
-    raise RuntimeError("NFW template is zero everywhere in ROI")
-nfw_spatial /= norm  # sum over ROI pixels = 1
-
-# -------------------------
-# Pixel solid angle map (same as PS template)
-# -------------------------
-omega = pixel_solid_angle_map(wcs, ny, nx, BINSZ_DEG)  # sr
-
-# -------------------------
-# Spectrum (unit total flux across bins)
-# Phi_bin has units ph/cm^2/s integrated over each bin
-# -------------------------
-if SPECTRUM == "flat":
+    # --- spectrum: flat Phi_bin, unit normalised over bins ---
     Phi_bin = np.ones(nE, float)
-else:
-    raise RuntimeError(f"Unknown SPECTRUM='{SPECTRUM}'")
+    Phi_bin /= Phi_bin.sum()  # sum_k Phi_bin = 1
 
-Phi_bin /= Phi_bin.sum()  # sum_k Phi_bin = 1 ph/cm^2/s
+    # --- build cubes ---
+    nfw_dnde = np.empty((nE, ny, nx), float)
+    for k in range(nE):
+        nfw_dnde[k] = (Phi_bin[k] * nfw_spatial) / (omega * dE_mev[k])
 
-# -------------------------
-# Build dN/dE cube (per MeV)
-# dN/dE = (Phi_bin * spatial) / (Omega_pix * dE)
-# Units: ph cm^-2 s^-1 sr^-1 MeV^-1
-# -------------------------
-nfw_dnde = np.empty((nE, ny, nx), float)
-for k in range(nE):
-    nfw_dnde[k] = (Phi_bin[k] * nfw_spatial) / (omega * dE_mev[k])
+    nfw_E2dnde = nfw_dnde * (Ectr_mev[:, None, None] ** 2)
+    mu_nfw = nfw_dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
 
-# E^2 dN/dE
-nfw_E2dnde = nfw_dnde * (Ectr_mev[:, None, None] ** 2)  # MeV cm^-2 s^-1 sr^-1
+    # -------------------------
+    # Write outputs (include EBOUNDS so checkers don’t need counts file)
+    # -------------------------
+    def _write_cube(path, data, bunit, comments):
+        phdu = fits.PrimaryHDU(data.astype(np.float32), header=hdr)
+        phdu.header["BUNIT"] = bunit
+        for c in comments:
+            phdu.header["COMMENT"] = c
+        hdul = fits.HDUList([phdu, eb_hdu])
+        hdul.writeto(path, overwrite=True)
 
-# Expected counts per bin per pixel:
-# mu = (dN/dE) * exposure * Omega_pix * dE
-mu_nfw = nfw_dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
+    _write_cube(
+        out_dnde,
+        nfw_dnde,
+        "ph cm-2 s-1 sr-1 MeV-1",
+        [
+            f"gNFW (gamma={args.halo_gamma:g}) rho^{args.rho_power:g} spatial template; sum ROI pixels = 1",
+            "Spectrum: Phi_bin flat, renormalised so sum_k Phi_bin = 1 ph/cm^2/s",
+            expo_comment,
+        ],
+    )
 
-# -------------------------
-# Write outputs
-# -------------------------
-hdu = fits.PrimaryHDU(nfw_dnde.astype(np.float32), header=hdr)
-hdu.header["BUNIT"] = "ph cm-2 s-1 sr-1 MeV-1"
-hdu.header["COMMENT"] = "gNFW (gamma=1.25) rho^2 spatial template; sum ROI pixels = 1"
-hdu.header["COMMENT"] = "Spectrum: Phi_bin flat, renormalised so sum_k Phi_bin = 1 ph/cm^2/s"
-hdu.writeto(OUT_DNDE, overwrite=True)
+    _write_cube(
+        out_e2dnde,
+        nfw_E2dnde,
+        "MeV cm-2 s-1 sr-1",
+        [
+            "E^2 dN/dE version of NFW template",
+            f"(Derived from dnde using Ectr^2, where Ectr from CCUBE EBOUNDS geometric mean.)",
+            expo_comment,
+        ],
+    )
 
-hdu = fits.PrimaryHDU(nfw_E2dnde.astype(np.float32), header=hdr)
-hdu.header["BUNIT"] = "MeV cm-2 s-1 sr-1"
-hdu.header["COMMENT"] = "E^2 dN/dE version of NFW template"
-hdu.writeto(OUT_E2DNDE, overwrite=True)
+    _write_cube(
+        out_mu,
+        mu_nfw,
+        "counts",
+        [
+            "Expected counts = dN/dE * exposure * Omega_pix * dE",
+            expo_comment,
+        ],
+    )
 
-hdu = fits.PrimaryHDU(mu_nfw.astype(np.float32), header=hdr)
-hdu.header["BUNIT"] = "counts"
-hdu.header["COMMENT"] = "Expected counts = dN/dE * exposure * Omega_pix * dE"
-hdu.writeto(OUT_MU, overwrite=True)
+    print("✓ wrote", out_dnde)
+    print("✓ wrote", out_e2dnde)
+    print("✓ wrote", out_mu)
+    print("sum Phi_bin:", float(Phi_bin.sum()))
+    print("mu_nfw total counts:", float(np.nansum(mu_nfw)))
+    print("mu_nfw per-bin:", np.nansum(mu_nfw, axis=(1, 2)))
 
-print("✓ wrote", OUT_DNDE)
-print("✓ wrote", OUT_E2DNDE)
-print("✓ wrote", OUT_MU)
-print("sum Phi_bin:", Phi_bin.sum())
-print("mu_nfw total counts:", float(np.nansum(mu_nfw)))
-print("mu_nfw per-bin:", np.nansum(mu_nfw, axis=(1, 2)))
+
+if __name__ == "__main__":
+    main()
