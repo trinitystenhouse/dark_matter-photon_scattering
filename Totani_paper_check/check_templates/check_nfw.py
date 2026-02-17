@@ -105,6 +105,214 @@ def _azimuthal_profile(map2d, lon_deg, lat_deg, psi_bins_deg):
             prof[i] = np.nanmean(map2d[m])
     return prof
 
+
+def read_coefficients(coeff_file, component_name):
+    """
+    Read coefficients from fitting output file.
+    Returns: (Ectr_gev, coefficients) arrays
+    """
+    Ectr_gev = []
+    coeffs = []
+
+    with open(coeff_file, "r") as f:
+        header = f.readline().strip()
+        # Header usually looks like:
+        #   "# k  Ectr(GeV)  GAS  ICS  ISO  PS  LOOPI  FB_FLAT  NFW"
+        # Strip leading comment marker if present.
+        if header.startswith("#"):
+            header = header.lstrip("#").strip()
+
+        cols = header.split()
+        if len(cols) < 3:
+            raise ValueError(f"Malformed coefficient header: '{header}'")
+
+        def _norm(s):
+            return "".join(ch for ch in str(s).lower() if ch.isalnum())
+
+        comp_req = _norm(component_name)
+
+        # Data lines: k, Ectr(GeV), then one column per component.
+        # Support case-insensitive and "contains" matching (e.g. NFW matches nfw_rho2.5_g1.25)
+        norm_cols = [_norm(c) for c in cols]
+        if comp_req in norm_cols:
+            comp_col = norm_cols.index(comp_req)
+        else:
+            hits = [i for i, nc in enumerate(norm_cols) if (comp_req in nc)]
+            if len(hits) == 1:
+                comp_col = hits[0]
+            else:
+                raise ValueError(
+                    f"Component '{component_name}' not found in coefficient file. Available: {cols[2:]}"
+                )
+
+        for line in f:
+            line = line.strip()
+            if (not line) or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) <= comp_col:
+                continue
+            Ectr_gev.append(float(parts[1]))
+            coeffs.append(float(parts[comp_col]))
+
+    return np.array(Ectr_gev), np.array(coeffs)
+
+
+def plot_scaled_flux(
+    Ectr_gev,
+    coeffs,
+    mu_counts,
+    expo,
+    omega,
+    dE_mev,
+    roi2d,
+    plot_dir,
+    component_name,
+    coeff_mode="multiplier",
+    show=False,
+):
+    """Plot the scaled flux from counts-space template.
+
+    We compute ROI-averaged intensity per bin using the same estimator as the fitter:
+      I_k = sum( model_counts ) / sum( expo * omega * dE )
+      E2_k = I_k * Ectr^2
+
+    where model_counts = coeff_k * mu_counts[k].
+    """
+    Ectr_gev = np.asarray(Ectr_gev, dtype=float)
+    coeffs = np.asarray(coeffs, dtype=float)
+
+    nE = int(mu_counts.shape[0])
+    if coeffs.size != nE:
+        raise ValueError(f"coeff length {coeffs.size} != template nE {nE}")
+
+    Ectr_mev = Ectr_gev * 1000.0
+
+    E2_template = np.full(nE, np.nan, dtype=float)
+    E2_scaled = np.full(nE, np.nan, dtype=float)
+    for k in range(nE):
+        m = roi2d & np.isfinite(mu_counts[k])
+        if not np.any(m):
+            continue
+        denom = float(np.nansum((expo[k] * omega * dE_mev[k])[m]))
+        if not np.isfinite(denom) or denom <= 0:
+            continue
+        C_tpl = float(np.nansum(mu_counts[k][m]))
+        E2_template[k] = (C_tpl / denom) * (Ectr_mev[k] ** 2)
+
+        if coeff_mode == "multiplier":
+            # coeff is dimensionless multiplier: model_counts = coeff * mu
+            C_scaled = float(coeffs[k]) * C_tpl
+        elif coeff_mode == "counts":
+            # coeff is total counts attributed to component in ROI for this bin.
+            C_scaled = float(coeffs[k])
+        else:
+            raise ValueError(f"Unknown coeff_mode='{coeff_mode}'")
+
+        E2_scaled[k] = (C_scaled / denom) * (Ectr_mev[k] ** 2)
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 10))
+    
+    # Top panel: Coefficients
+    ax1.plot(Ectr_gev, coeffs, 'o-', lw=2, label='Fit coefficients')
+    ax1.axhline(1.0, color='k', ls='--', alpha=0.3, label='Coefficient = 1')
+    ax1.set_xscale('log')
+    ax1.set_xlabel('Energy [GeV]')
+    ax1.set_ylabel('Fit Coefficient')
+    ax1.set_title(f'{component_name}: Fit Coefficients vs Energy')
+    ax1.grid(True, which='both', alpha=0.3)
+    ax1.legend()
+    
+    # Bottom panel: Scaled flux
+    ax2.plot(Ectr_gev, E2_scaled, "o-", lw=2, label="Scaled flux (coeff x template)")
+    ax2.plot(Ectr_gev, E2_template, "s--", lw=1.5, alpha=0.6, label="Template (unscaled)")
+    ax2.set_xscale('log')
+    ax2.set_yscale('log')
+    ax2.set_xlabel('Energy [GeV]')
+    ax2.set_ylabel('E² dN/dE [MeV cm⁻² s⁻¹ sr⁻¹]')
+    ax2.set_title(f'{component_name}: Scaled Flux (ROI-averaged)')
+    ax2.grid(True, which='both', alpha=0.3)
+    ax2.legend()
+    
+    fig.tight_layout()
+    outpath = os.path.join(plot_dir, f"{component_name.lower()}_scaled_flux.png")
+    fig.savefig(outpath, dpi=200)
+    print(f"✓ Saved scaled flux plot: {outpath}")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
+def plot_scaled_spatial_maps(
+    *,
+    k,
+    wcs,
+    roi2d,
+    coeff_k,
+    mu_k,
+    expo_k,
+    omega,
+    dE_mev_k,
+    Ectr_mev_k,
+    plot_dir,
+    component_name,
+    coeff_mode="multiplier",
+    map_norm="log",
+    show=False,
+):
+    """Plot scaled spatial E^2 dN/dE map for one energy bin."""
+    denom = expo_k * omega * dE_mev_k
+    E2_map = np.full_like(mu_k, np.nan, dtype=float)
+    ok = np.isfinite(denom) & (denom > 0) & np.isfinite(mu_k)
+    if np.any(ok):
+        if coeff_mode == "multiplier":
+            # model_counts_map = coeff * mu
+            counts_map = float(coeff_k) * mu_k
+        elif coeff_mode == "counts":
+            # model_counts_map = C_tot * (mu / sum(mu in ROI))
+            s = float(np.nansum(mu_k[roi2d & np.isfinite(mu_k)]))
+            if not np.isfinite(s) or s <= 0:
+                counts_map = np.full_like(mu_k, np.nan, dtype=float)
+            else:
+                counts_map = float(coeff_k) * (mu_k / s)
+        else:
+            raise ValueError(f"Unknown coeff_mode='{coeff_mode}'")
+
+        I = counts_map[ok] / denom[ok]
+        E2_map[ok] = I * (Ectr_mev_k ** 2)
+
+    E2_plot = np.where(roi2d, E2_map, np.nan)
+
+    fig = plt.figure(figsize=(7.2, 5.6))
+    ax = fig.add_subplot(111, projection=wcs)
+
+    if map_norm == "log":
+        finite = np.isfinite(E2_plot) & (E2_plot > 0)
+        if np.any(finite):
+            vmin = float(np.nanpercentile(E2_plot[finite], 5))
+            vmax = float(np.nanpercentile(E2_plot[finite], 99.5))
+            vmin = max(vmin, vmax * 1e-6) if np.isfinite(vmax) and vmax > 0 else vmin
+            norm = LogNorm(vmin=max(vmin, 1e-30), vmax=max(vmax, max(vmin, 1e-30)))
+        else:
+            norm = None
+        im = ax.imshow(E2_plot, origin="lower", cmap="magma", norm=norm)
+    else:
+        im = ax.imshow(E2_plot, origin="lower", cmap="magma")
+
+    ax.set_title(f"{component_name} scaled E2 dN/dE (k={k:02d})")
+    ax.set_xlabel("l")
+    ax.set_ylabel("b")
+    cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cb.set_label("MeV cm$^{-2}$ s$^{-1}$ sr$^{-1}$")
+    fig.tight_layout()
+    outpath = os.path.join(plot_dir, f"{component_name.lower()}_scaled_E2_map_k{k:02d}.png")
+    fig.savefig(outpath, dpi=200)
+    print(f"✓ Saved scaled spatial map: {outpath}")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
 # -------------------------
 # Main checks
 # -------------------------
@@ -114,10 +322,10 @@ def main():
     data_dir = os.path.join(repo_dir, "fermi_data", "totani") if repo_dir else None
     default_counts = os.path.join(data_dir, "processed", "counts_ccube_1000to1000000.fits") if data_dir else None
     default_expo = os.path.join(data_dir, "processed", "expcube_1000to1000000.fits") if data_dir else None
-    default_dnde = os.path.join(data_dir, "processed", "templates", "nfw_rho2_g1.25_dnde.fits") if data_dir else None
-    default_e2 = os.path.join(data_dir, "processed", "templates", "nfw_rho2_g1.25_E2dnde.fits") if data_dir else None
-    default_mu = os.path.join(data_dir, "processed", "templates", "mu_nfw_rho2_g1.25_counts.fits") if data_dir else None
-
+    default_dnde = os.path.join(data_dir, "processed", "templates", "nfw_rho2.5_g1.25_dnde.fits") if data_dir else None
+    default_e2 = os.path.join(data_dir, "processed", "templates", "nfw_rho2.5_g1.25_E2dnde.fits") if data_dir else None
+    default_mu = os.path.join(data_dir, "processed", "templates", "mu_nfw_rho2.5_g1.25_counts.fits") if data_dir else None
+    default_coeffs = os.path.join(repo_dir, "Totani_paper_check", "fig2_3", "fit_coefficients_fig2_highlat.txt")
     ap = argparse.ArgumentParser()
     ap.add_argument("--dnde", default=default_dnde, help="nfw*_dnde.fits")
     ap.add_argument("--e2", default=default_e2, help="nfw*_E2dnde.fits")
@@ -137,6 +345,14 @@ def main():
     ap.add_argument("--plot-lonwin", type=float, default=5.0, help="Longitude half-width (deg) for latitude profile I(b)")
     ap.add_argument("--map-norm", choices=["linear", "log"], default="log", help="Map color normalization")
     ap.add_argument("--show", action="store_true", help="Show plots interactively (in addition to saving)")
+    ap.add_argument("--coeff-file", default=default_coeffs, help="Coefficient file from fitting (e.g., fit_coefficients_fig2_highlat.txt)")
+    ap.add_argument("--component-name", default="NFW", help="Component name in coefficient file (default: NFW)")
+    ap.add_argument(
+        "--coeff-mode",
+        choices=["multiplier", "counts"],
+        default="counts",
+        help="How to interpret the coefficient column: 'multiplier' means model=coeff*mu; 'counts' means coeff is total counts in ROI per bin.",
+    )
 
     args = ap.parse_args()
 
@@ -412,7 +628,57 @@ def main():
     frac_increasing = float(np.mean(diffs > 0)) if np.isfinite(diffs).any() else float("nan")
     print(f"[RADIAL] frac of bins where profile increases outward = {frac_increasing:.3f} (expect small)")
 
-    print("\n✓ Done. If anything flagged ⚠, paste the relevant lines and I’ll tell you exactly what to change.")
+    # --- Plot scaled flux if coefficient file provided ---
+    if args.coeff_file is not None:
+        if not os.path.exists(args.coeff_file):
+            print(f"\n⚠ Coefficient file not found: {args.coeff_file}")
+        elif args.expo is None:
+            print("\n⚠ --expo is required to compute scaled E2 dN/dE from counts-space templates.")
+        else:
+            print(f"\n[SCALED FLUX] Reading coefficients from: {args.coeff_file}")
+            try:
+                Ectr_gev_coeff, coeffs = read_coefficients(args.coeff_file, args.component_name)
+                print(f"[SCALED FLUX] Component: {args.component_name}")
+                print(f"[SCALED FLUX] Coefficient range: {np.nanmin(coeffs):.3e} to {np.nanmax(coeffs):.3e}")
+                plot_scaled_flux(
+                    Ectr_gev_coeff,
+                    coeffs,
+                    mu,
+                    expo,
+                    omega,
+                    dE_mev,
+                    roi,
+                    args.plot_dir,
+                    args.component_name,
+                    coeff_mode=args.coeff_mode,
+                    show=args.show,
+                )
+
+                # Spatial map (scaled E2 dN/dE) for one representative energy bin
+                k_map = args.plot_k
+                if k_map is None:
+                    k_map = int(nE // 2)
+                k_map = int(np.clip(k_map, 0, nE - 1))
+                plot_scaled_spatial_maps(
+                    k=k_map,
+                    wcs=wcs,
+                    roi2d=roi,
+                    coeff_k=coeffs[k_map],
+                    mu_k=mu[k_map],
+                    expo_k=expo[k_map],
+                    omega=omega,
+                    dE_mev_k=float(dE_mev[k_map]),
+                    Ectr_mev_k=float(Ectr_mev[k_map]),
+                    plot_dir=args.plot_dir,
+                    component_name=args.component_name,
+                    coeff_mode=args.coeff_mode,
+                    map_norm=args.map_norm,
+                    show=args.show,
+                )
+            except Exception as e:
+                print(f"⚠ Error plotting scaled flux: {e}")
+
+    print("\n✓ Done. If anything flagged ⚠, paste the relevant lines and I'll tell you exactly what to change.")
 
 if __name__ == "__main__":
     main()
