@@ -19,7 +19,7 @@ def psf68_deg(E_GeV):
     return np.maximum(0.8 * (E_GeV)**(-0.8), 0.2)
 
 # Inflate everything slightly (recommended)
-EXT_FACTOR = 1.5
+EXT_FACTOR = 1.2
 
 # Choose containment for Gaussian-like models:
 GAUSS_CONTAIN = "95"  # "68" or "95"

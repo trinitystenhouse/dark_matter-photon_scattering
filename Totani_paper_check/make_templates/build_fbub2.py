@@ -109,7 +109,7 @@ REPO_DIR = os.environ["REPO_PATH"]
 DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
 COUNTS = os.path.join(DATA_DIR, "processed", "counts_ccube_1000to1000000.fits")
 EXPO = os.path.join(DATA_DIR, "processed", "expcube_1000to1000000.fits")
-PSMASK = os.path.join(DATA_DIR, "processed", "templates", "mask_extended_sources.fits")
+PSMASK = None
 PSC = os.path.join(DATA_DIR, "templates", "gll_psc_v35.fit")
 
 OUTDIR = os.path.join(os.path.dirname(__file__), "plots_fig1")
@@ -324,7 +324,10 @@ with fits.open(EXPO) as h:
         raise RuntimeError("Exposure cube has no ENERGIES extension")
 
 nE, ny, nx = counts.shape
-ps_mask = load_mask_any_shape(PSMASK, counts.shape)
+if PSMASK is not None and os.path.exists(str(PSMASK)):
+    ps_mask = load_mask_any_shape(PSMASK, counts.shape)
+else:
+    ps_mask = np.ones_like(counts, dtype=bool)
 
 Ectr = np.sqrt(eb["E_MIN"] * eb["E_MAX"]) / 1000.0  # MeV
 dE   = (eb["E_MAX"] - eb["E_MIN"]) / 1000.0         # MeV

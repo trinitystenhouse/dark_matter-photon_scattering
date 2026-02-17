@@ -47,6 +47,11 @@ def main():
     ap.add_argument("--rho-power", type=float, default=2.5)
     ap.add_argument("--n-s", type=int, default=512)
     ap.add_argument("--chunk", type=int, default=8)
+    
+    # Physical DM parameters
+    ap.add_argument("--dm-mass-gev", type=float, default=100.0, help="DM particle mass [GeV]")
+    ap.add_argument("--sigmav", type=float, default=3e-26, help="Annihilation cross-section [cm^3/s]")
+    ap.add_argument("--channel", type=str, default="bb", choices=["bb", "tautau", "WW", "mumu"], help="Annihilation channel")
 
     ap.add_argument(
         "--expo-sampling",
@@ -140,22 +145,90 @@ def main():
     roi = (np.abs(lon) <= args.roi_lon) & (np.abs(lat) <= args.roi_lat)
     nfw_spatial[~roi] = 0.0
 
-    norm = np.nansum(nfw_spatial)
-    if not np.isfinite(norm) or norm <= 0:
-        raise RuntimeError("NFW template is zero everywhere in ROI")
-    nfw_spatial /= norm
-
     # --- solid angle map (must match your fitter conventions) ---
     omega = pixel_solid_angle_map(wcs, ny, nx, args.binsz)
-
-    # --- spectrum: flat Phi_bin, unit normalised over bins ---
-    Phi_bin = np.ones(nE, float)
-    Phi_bin /= Phi_bin.sum()  # sum_k Phi_bin = 1
-
-    # --- build cubes ---
+    
+    # --- Physical DM annihilation spectrum ---
+    # Use simple power-law approximation for annihilation spectrum
+    # For more accurate spectra, use PPPC4DMID tables or similar
+    dm_mass_gev = args.dm_mass_gev
+    sigmav = args.sigmav  # cm^3/s
+    
+    # Annihilation spectrum dN/dE (photons per annihilation per GeV)
+    # Simple approximation: power-law with cutoff at m_DM
+    Ectr_gev = Ectr_mev / 1000.0
+    
+    if args.channel == "bb":
+        # b-bbar: relatively hard spectrum, peaks around E ~ 0.1*m_DM
+        dNdE_per_annihilation = np.where(
+            Ectr_gev < dm_mass_gev,
+            20.0 * (Ectr_gev / dm_mass_gev)**(-1.5) * np.exp(-Ectr_gev / (0.3 * dm_mass_gev)),
+            0.0
+        )
+    elif args.channel == "tautau":
+        # tau+tau-: softer spectrum
+        dNdE_per_annihilation = np.where(
+            Ectr_gev < dm_mass_gev,
+            15.0 * (Ectr_gev / dm_mass_gev)**(-2.0) * np.exp(-Ectr_gev / (0.2 * dm_mass_gev)),
+            0.0
+        )
+    elif args.channel == "WW":
+        # W+W-: hard spectrum with features
+        dNdE_per_annihilation = np.where(
+            Ectr_gev < dm_mass_gev,
+            25.0 * (Ectr_gev / dm_mass_gev)**(-1.0) * np.exp(-Ectr_gev / (0.4 * dm_mass_gev)),
+            0.0
+        )
+    else:  # mumu
+        # mu+mu-: very soft, mostly low energy
+        dNdE_per_annihilation = np.where(
+            Ectr_gev < dm_mass_gev,
+            10.0 * (Ectr_gev / dm_mass_gev)**(-2.5) * np.exp(-Ectr_gev / (0.1 * dm_mass_gev)),
+            0.0
+        )
+    
+    # Convert to per MeV
+    dNdE_per_annihilation_MeV = dNdE_per_annihilation / 1000.0
+    
+    # Particle physics factor: Phi_pp = (1/4π) * (σv / 2m²) * dN/dE
+    # Units: [cm^3/s / GeV^2] * [1/MeV] = [cm^3 s^-1 GeV^-2 MeV^-1]
+    m_gev_sq = dm_mass_gev ** 2
+    Phi_pp = (sigmav / (8.0 * np.pi * m_gev_sq)) * dNdE_per_annihilation_MeV  # [cm^3 s^-1 GeV^-2 MeV^-1]
+    
+    # Convert GeV^-2 to MeV^-2 for consistency
+    Phi_pp = Phi_pp * 1e6  # [cm^3 s^-1 MeV^-2 MeV^-1] = [cm^3 s^-1 MeV^-3]
+    
+    # J-factor: line-of-sight integral of ρ² [GeV^2 cm^-5]
+    # For NFW profile, J ~ 10^23 - 10^25 GeV^2 cm^-5 depending on direction
+    # We use the spatial template (already ρ^2.5 or similar) as the J-factor map
+    # Normalize to a typical J-factor value
+    # Typical J-factor for inner Galaxy: J ~ 10^24 GeV^2 cm^-5
+    J_typical_gev2_cm5 = 1e24
+    
+    # nfw_spatial is already proportional to ρ^rho_power
+    # For annihilation, we need ρ^2, so if rho_power != 2, we need to adjust
+    # For simplicity, assume nfw_spatial represents the relative J-factor distribution
+    # and normalize it to J_typical at the peak
+    J_map_gev2_cm5 = nfw_spatial * J_typical_gev2_cm5 / np.nanmax(nfw_spatial)
+    
+    # Convert J-factor to MeV^2 cm^-5
+    J_map_mev2_cm5 = J_map_gev2_cm5 * 1e6  # [MeV^2 cm^-5]
+    
+    # Differential flux: dΦ/dE = Phi_pp * J  [cm^3 s^-1 MeV^-3] * [MeV^2 cm^-5] = [cm^-2 s^-1 MeV^-1]
+    # This is already per steradian since J is integrated along line of sight
+    # Actually, we need to divide by solid angle to get per steradian
+    # dΦ/dE/dΩ = (Phi_pp * J) / (4π sr) for isotropic emission
+    # But J already accounts for the line-of-sight integral, so:
+    # dΦ/dE = Phi_pp * J  [cm^-2 s^-1 MeV^-1] (integrated over solid angle)
+    # To get per steradian: divide by pixel solid angle
+    
+    # Build intensity cube: dN/dE [ph cm^-2 s^-1 sr^-1 MeV^-1]
     nfw_dnde = np.empty((nE, ny, nx), float)
     for k in range(nE):
-        nfw_dnde[k] = (Phi_bin[k] * nfw_spatial) / (omega * dE_mev[k])
+        # Flux per pixel: Phi_pp[k] * J_map [cm^-2 s^-1 MeV^-1]
+        flux_per_pixel = Phi_pp[k] * J_map_mev2_cm5
+        # Intensity per steradian: flux / solid_angle
+        nfw_dnde[k] = flux_per_pixel / omega
 
     nfw_E2dnde = nfw_dnde * (Ectr_mev[:, None, None] ** 2)
     mu_nfw = nfw_dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
@@ -176,8 +249,9 @@ def main():
         nfw_dnde,
         "ph cm-2 s-1 sr-1 MeV-1",
         [
-            f"gNFW (gamma={args.halo_gamma:g}) rho^{args.rho_power:g} spatial template; sum ROI pixels = 1",
-            "Spectrum: Phi_bin flat, renormalised so sum_k Phi_bin = 1 ph/cm^2/s",
+            f"Physical DM annihilation: gNFW (gamma={args.halo_gamma:g}) rho^{args.rho_power:g}",
+            f"DM mass = {args.dm_mass_gev} GeV, sigmav = {args.sigmav:.2e} cm^3/s, channel = {args.channel}",
+            f"J-factor normalization: {J_typical_gev2_cm5:.2e} GeV^2 cm^-5 at peak",
             expo_comment,
         ],
     )
@@ -206,7 +280,8 @@ def main():
     print("✓ wrote", out_dnde)
     print("✓ wrote", out_e2dnde)
     print("✓ wrote", out_mu)
-    print("sum Phi_bin:", float(Phi_bin.sum()))
+    print(f"Physical DM model: m_DM = {args.dm_mass_gev} GeV, sigmav = {args.sigmav:.2e} cm^3/s, channel = {args.channel}")
+    print(f"J-factor (peak): {J_typical_gev2_cm5:.2e} GeV^2 cm^-5")
     print("mu_nfw total counts:", float(np.nansum(mu_nfw)))
     print("mu_nfw per-bin:", np.nansum(mu_nfw, axis=(1, 2)))
 

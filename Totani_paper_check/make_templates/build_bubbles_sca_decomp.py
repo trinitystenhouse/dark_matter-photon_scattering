@@ -437,8 +437,7 @@ def _stage_apply_keep_masks(*, args, counts, expo, roi2d, templates_dir):
     if args.ext_mask:
         ext_keep3d = load_mask_any_shape(args.ext_mask, counts.shape)
     else:
-        default_ext = os.path.join(templates_dir, "mask_extended_sources.fits")
-        ext_keep3d = load_mask_any_shape(default_ext, counts.shape) if os.path.exists(default_ext) else np.ones_like(counts, bool)
+        ext_keep3d = np.ones_like(counts, bool)
 
     if args.ps_mask:
         ps_keep3d = load_mask_any_shape(args.ps_mask, counts.shape)

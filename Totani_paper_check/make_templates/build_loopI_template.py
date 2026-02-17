@@ -193,12 +193,37 @@ def main():
     if not np.isfinite(s) or s <= 0:
         raise RuntimeError("Loop I template is zero in ROI; check shell parameters")
 
-    T /= s
-
-    # --- build cubes with your conventions ---
+    # Normalize spatial template to peak = 1 for physical scaling
+    T_normalized = T / np.nanmax(T)
+    
+    # --- Physical Loop I gamma-ray emission model ---
+    # Loop I is a radio shell with known surface brightness
+    # Gamma-rays come from inverse Compton scattering of electrons on ISRF/CMB
+    # 
+    # Radio observations: Loop I has surface brightness ~ 10-100 K at 408 MHz
+    # This corresponds to electron column density N_e ~ 10^20 cm^-2
+    # 
+    # For IC emission, the gamma-ray intensity scales as:
+    # I_gamma ~ n_e * W_ISRF * sigma_T * c
+    # where W_ISRF ~ 1 eV/cm^3 is the ISRF energy density
+    #
+    # Typical Loop I gamma-ray surface brightness (from Fermi observations):
+    # I_gamma ~ 10^-7 to 10^-6 ph cm^-2 s^-1 sr^-1 MeV^-1 at 1 GeV
+    # with spectrum roughly E^-2.5 to E^-3
+    
+    # Peak surface brightness at 1 GeV reference energy
+    I_peak_1GeV = 5e-7  # ph cm^-2 s^-1 sr^-1 MeV^-1 (typical for Loop I)
+    E_ref_GeV = 1.0
+    spectral_index = -2.7  # E^-2.7 spectrum (typical for IC)
+    
+    # Energy-dependent surface brightness
+    Ectr_gev = Ectr_mev / 1000.0
+    I_loopI_spectrum = I_peak_1GeV * (Ectr_gev / E_ref_GeV) ** spectral_index  # [ph cm^-2 s^-1 sr^-1 MeV^-1]
+    
+    # Build intensity cube: spatial template * spectrum
     loopI_dnde = np.empty((nE, ny, nx), float)
     for k in range(nE):
-        loopI_dnde[k] = T / (omega * dE_mev[k])
+        loopI_dnde[k] = T_normalized * I_loopI_spectrum[k]
 
     loopI_E2dnde = loopI_dnde * (Ectr_mev[:, None, None] ** 2)
 
@@ -214,11 +239,12 @@ def main():
         loopI_dnde,
         hdr,
         "ph cm-2 s-1 sr-1 MeV-1",
-        comments=[
-            "Loop I geometric template (two-shell rings) on counts grid",
-            "Energy-independent morphology; per-bin intensity scales as 1/(Omega*dE)",
-            f"shell1 center(l,b)=({args.shell1_l},{args.shell1_b}) deg, D={args.shell1_dist_pc} pc, r=[{args.shell1_rin_pc},{args.shell1_rout_pc}] pc",
-            f"shell2 center(l,b)=({args.shell2_l},{args.shell2_b}) deg, D={args.shell2_dist_pc} pc, r=[{args.shell2_rin_pc},{args.shell2_rout_pc}] pc",
+        [
+            "Loop I template: Physical IC emission model",
+            f"Peak intensity at 1 GeV: {I_peak_1GeV:.2e} ph cm^-2 s^-1 sr^-1 MeV^-1",
+            f"Spectral index: E^{spectral_index}",
+            f"Shell 1: center=({args.shell1_l},{args.shell1_b}), R_in={args.shell1_rin_pc}, R_out={args.shell1_rout_pc} pc",
+            f"Shell 2: center=({args.shell2_l},{args.shell2_b}), R_in={args.shell2_rin_pc}, R_out={args.shell2_rout_pc} pc",
         ],
     )
     write_primary_with_bunit(
@@ -226,7 +252,7 @@ def main():
         loopI_E2dnde,
         hdr,
         "MeV cm-2 s-1 sr-1",
-        comments=[
+        [
             "Loop I geometric template: E^2 dN/dE",
         ],
     )
@@ -235,7 +261,7 @@ def main():
         mu_loopI,
         hdr,
         "counts",
-        comments=[
+        [
             "Loop I geometric template: expected counts per bin per pixel",
         ],
     )

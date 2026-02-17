@@ -72,7 +72,7 @@ def main():
 
     ap.add_argument("--outdir-data", default=os.path.join(DATA_DIR, "processed", "templates"))
 
-    ap.add_argument("--ext-mask", required=False, help="extended-source mask FITS True=keep")
+    ap.add_argument("--ext-mask", required=False, help="extended-source mask FITS True=keep (optional; default is NO masking)")
     ap.add_argument("--ps-mask", required=False, help="optional point-source mask FITS True=keep")
     ap.add_argument("--bubble-mask", required=False, help="optional FITS mask (ny,nx) selecting bubble region")
 
@@ -152,8 +152,7 @@ def main():
     if args.ext_mask:
         ext_keep3d = load_mask_any_shape(args.ext_mask, counts.shape)
     else:
-        default_ext = os.path.join(templates_dir, "mask_extended_sources.fits")
-        ext_keep3d = load_mask_any_shape(default_ext, counts.shape) if os.path.exists(default_ext) else np.ones_like(counts, bool)
+        ext_keep3d = np.ones_like(counts, bool)
 
     if args.ps_mask:
         ps_keep3d = load_mask_any_shape(args.ps_mask, counts.shape)
