@@ -72,8 +72,8 @@ def main():
 
     ap.add_argument("--pos-dnde", default=os.path.join(templates_dir, "bubbles_pos_dnde.fits"))
     ap.add_argument("--neg-dnde", default=os.path.join(templates_dir, "bubbles_neg_dnde.fits"))
-    ap.add_argument("--pos-mu", default=os.path.join(templates_dir, "mu_bubbles_pos_counts.fits"))
-    ap.add_argument("--neg-mu", default=os.path.join(templates_dir, "mu_bubbles_neg_counts.fits"))
+    ap.add_argument("--pos-mu", default=os.path.join(templates_dir, "mu_fbpos_E4.3GeV_k2_roiL60_roiB60_normnone_expocenter_counts.fits"))
+    ap.add_argument("--neg-mu", default=os.path.join(templates_dir, "mu_fbneg_E4.3GeV_k2_roiL60_roiB60_normnone_expocenter_counts"))
 
     ap.add_argument("--ref-gev", type=float, default=4.3)
     ap.add_argument("--k", type=int, default=None, help="Override energy-bin index")
