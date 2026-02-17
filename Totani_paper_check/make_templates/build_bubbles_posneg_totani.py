@@ -1,250 +1,267 @@
 #!/usr/bin/env python3
+"""
+Totani-style structured Fermi Bubbles templates from a single-energy residual map (~4.3 GeV).
+
+Method (Totani):
+  1) Do an initial fit including a *flat* FB template.
+  2) At E ≈ 4.3 GeV (where FB are clear), form a residual map R(l,b).
+  3) Define two spatial templates:
+       FB_pos(l,b) = max(R, 0)   (bubble-like positive regions)
+       FB_neg(l,b) = max(-R, 0)  (negative regions absorbing model mismatch)
+     Use these as energy-independent spatial templates in subsequent fits.
+  4) Important: FB_pos is based on positive regions regardless of the flat-template boundary.
+
+This script does steps 2–3 (builds FB_pos and FB_neg) and writes:
+  - mu_fbpos*_counts.fits
+  - mu_fbneg*_counts.fits
+  - fbpos*_dnde.fits, fbpos*_E2dnde.fits
+  - fbneg*_dnde.fits, fbneg*_E2dnde.fits
+
+NO unnecessary normalisations:
+  - by default, we DO NOT renormalize FB_pos/FB_neg (their absolute scale is whatever the residual gives).
+  - optional --norm roi-sum if you *want* to match "sum over ROI pixels = 1" convention.
+
+Residual sources:
+  - Either provide --model-mu (3D expected counts cube) and we compute R = counts[k0]-model[k0]
+  - Or provide --residual-map (2D FITS) on the CCUBE grid in *counts* units.
+"""
 
 import os
-
+import argparse
 import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
-from scipy.optimize import nnls
 
 from totani_helpers.totani_io import (
-    lonlat_grids,
     pixel_solid_angle_map,
-    read_counts_and_ebounds,
     read_expcube_energies_mev,
     resample_exposure_logE_interp,
 )
 
-REPO_DIR = os.environ["REPO_PATH"]
-DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
+
+def pick_energy_index(Ectr_mev, target_gev):
+    target_mev = 1000.0 * float(target_gev)
+    return int(np.argmin(np.abs(Ectr_mev - target_mev)))
 
 
-def fit_bin_weighted_nnls(counts_2d, mu_components, mask_2d, eps=1.0):
-    m = mask_2d.ravel()
-    y = counts_2d.ravel()[m]
-    X = np.vstack([mu.ravel()[m] for mu in mu_components]).T
-
-    good = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
-    y = y[good]
-    X = X[good]
-    if y.size == 0:
-        return np.zeros(X.shape[1], dtype=float)
-
-    w = 1.0 / np.sqrt(np.maximum(y, 0.0) + eps)
-    yw = y * w
-    Xw = X * w[:, None]
-
-    A, _ = nnls(Xw, yw)
-    return A
-
-
-def load_mask_any_shape(mask_path, counts_shape):
-    m = fits.getdata(mask_path).astype(bool)
-    nE, ny, nx = counts_shape
-    if m.shape == (nE, ny, nx):
-        return m
-    if m.shape == (ny, nx):
-        return np.broadcast_to(m[None, :, :], (nE, ny, nx)).copy()
-    raise RuntimeError(f"Mask shape {m.shape} not compatible with counts shape {(nE, ny, nx)}")
-
-
-def _read_cube(path, expected_shape):
+def read_2d_fits(path):
     with fits.open(path) as h:
-        d = h[0].data.astype(float)
-    if d.shape != expected_shape:
-        raise RuntimeError(f"{path} has shape {d.shape}, expected {expected_shape}")
-    return d
-
-
-def _write_primary_with_bunit(path, data, hdr_in, bunit):
-    hdr = hdr_in.copy()
-    hdr["BUNIT"] = str(bunit)
-    fits.PrimaryHDU(data=np.asarray(data, dtype=np.float32), header=hdr).writeto(path, overwrite=True)
+        data = h[0].data if h[0].data is not None else h[1].data
+        arr = np.array(data, dtype=np.float64)
+    if arr.ndim != 2:
+        raise RuntimeError(f"--residual-map must be 2D, got shape {arr.shape}")
+    return arr
 
 
 def main():
-    import argparse
-
     ap = argparse.ArgumentParser()
-    ap.add_argument("--counts", default=os.path.join(DATA_DIR, "processed", "counts_ccube_1000to1000000.fits"))
-    ap.add_argument("--expcube", default=os.path.join(DATA_DIR, "processed", "expcube_1000to1000000.fits"))
-    ap.add_argument("--templates-dir", default=os.path.join(DATA_DIR, "processed", "templates"))
 
-    ap.add_argument("--outdir-data", default=os.path.join(DATA_DIR, "processed", "templates"))
+    repo_dir = os.environ.get("REPO_PATH", os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    data_dir = os.path.join(repo_dir, "fermi_data", "totani")
+    default_counts = os.path.join(data_dir, "processed", "counts_ccube_1000to1000000.fits")
+    default_expo = os.path.join(data_dir, "processed", "expcube_1000to1000000.fits")
+    default_outdir = os.path.join(data_dir, "processed", "templates")
+    default_model_mu = os.path.join(repo_dir, "Totani_paper_check", "fig1", "plots_fig1", "mu_modelsum_counts.fits")
 
-    ap.add_argument("--ext-mask", required=False, help="extended-source mask FITS True=keep (optional; default is NO masking)")
-    ap.add_argument("--ps-mask", required=False, help="optional point-source mask FITS True=keep")
-    ap.add_argument("--bubble-mask", required=False, help="optional FITS mask (ny,nx) selecting bubble region")
+    ap.add_argument("--counts", default=default_counts, help="Counts CCUBE (authoritative WCS + EBOUNDS)")
+    ap.add_argument("--expo", default=default_expo, help="Exposure cube (expcube)")
+    ap.add_argument("--outdir", default=default_outdir)
 
+    # Provide exactly one of these:
+    ap.add_argument(
+        "--model-mu",
+        default=default_model_mu,
+        help="Best-fit model expected counts cube (3D, same shape as counts)",
+    )
+    ap.add_argument("--residual-map", default=None, help="2D residual map at target energy on CCUBE grid (counts units)")
+
+    ap.add_argument("--binsz", type=float, default=0.125)
     ap.add_argument("--roi-lon", type=float, default=60.0)
     ap.add_argument("--roi-lat", type=float, default=60.0)
-    ap.add_argument("--disk-cut", type=float, default=10.0)
-    ap.add_argument("--binsz", type=float, default=0.125)
+
+    ap.add_argument("--target-gev", type=float, default=4.3, help="Energy (GeV) to build residual templates from")
+
+    # Totani’s halo-search stage excludes disk, but the *construction* is just “positive/negative regions at 4.3 GeV”.
+    # You can optionally zero the disk here if you want the templates to ignore it.
+    ap.add_argument("--mask-disk", type=float, default=0.0, help="If >0, zero |b| < mask_disk degrees")
 
     ap.add_argument(
-        "--ref-gev",
-        type=float,
-        default=4.3,
-        help="Reference energy (GeV) used to construct FB_POS/FB_NEG from the bubbles image",
+        "--norm",
+        choices=["none", "roi-sum"],
+        default="none",
+        help="Template normalization. Default 'none' = no rescaling (Totani-style, avoid unnecessary norms).",
     )
 
-    ap.add_argument("--include-nfw", action="store_true")
-    ap.add_argument("--include-loopi", action="store_true")
+    ap.add_argument(
+        "--expo-sampling",
+        choices=["center", "edge-mean"],
+        default="center",
+        help="Exposure per CCUBE bin: at bin center, or mean of exposure at (Emin,Emax).",
+    )
 
     args = ap.parse_args()
 
-    os.makedirs(args.outdir_data, exist_ok=True)
+    if (args.model_mu is None) == (args.residual_map is None):
+        raise RuntimeError("Provide exactly one of: --model-mu OR --residual-map")
 
-    counts, hdr, Emin, Emax, Ectr_mev, dE_mev = read_counts_and_ebounds(args.counts)
-    nE, ny, nx = counts.shape
-    wcs = WCS(hdr).celestial
+    os.makedirs(args.outdir, exist_ok=True)
 
-    with fits.open(args.expcube) as he:
+    # --- Read CCUBE header + EBOUNDS ---
+    with fits.open(args.counts) as hc:
+        hdr = hc[0].header
+        wcs = WCS(hdr).celestial
+        counts_cube = np.array(hc[0].data, dtype=np.float64)
+        ny, nx = hdr["NAXIS2"], hdr["NAXIS1"]
+
+        if "EBOUNDS" not in hc:
+            raise RuntimeError("Counts CCUBE missing EBOUNDS extension.")
+        eb = hc["EBOUNDS"].data
+        eb_hdu = hc["EBOUNDS"].copy()
+
+    if counts_cube.ndim != 3:
+        raise RuntimeError(f"Counts cube must be 3D (nE,ny,nx), got {counts_cube.shape}")
+
+    Emin_mev = np.array(eb["E_MIN"], dtype=float) / 1000.0
+    Emax_mev = np.array(eb["E_MAX"], dtype=float) / 1000.0
+    dE_mev = (Emax_mev - Emin_mev)
+    Ectr_mev = np.sqrt(Emin_mev * Emax_mev)
+    nE = int(Ectr_mev.size)
+
+    if counts_cube.shape[0] != nE:
+        raise RuntimeError(f"Counts cube nE={counts_cube.shape[0]} but EBOUNDS has nE={nE}")
+
+    # --- Read exposure cube + resample to CCUBE E bins ---
+    with fits.open(args.expo) as he:
         expo_raw = np.array(he[0].data, dtype=np.float64)
-        E_expo = read_expcube_energies_mev(he)
-    expo = resample_exposure_logE_interp(expo_raw, E_expo, Ectr_mev)
-    if expo.shape != counts.shape:
-        raise RuntimeError("Exposure shape mismatch after resampling")
+        E_expo_mev = read_expcube_energies_mev(he)
 
-    omega = pixel_solid_angle_map(wcs, ny, nx, binsz_deg=float(args.binsz))
-    lon_w, lat = lonlat_grids(wcs, ny, nx)
+    if expo_raw.shape[1:] != (ny, nx):
+        raise RuntimeError(f"Exposure spatial shape {expo_raw.shape[1:]} != counts {(ny, nx)}")
 
-    roi2d = (np.abs(lon_w) <= args.roi_lon) & (np.abs(lat) <= args.roi_lat)
-    disk2d = np.abs(lat) >= args.disk_cut
-
-    templates_dir = args.templates_dir
-
-    mu_gas = _read_cube(os.path.join(templates_dir, "mu_gas_counts.fits"), counts.shape)
-    mu_ics = _read_cube(os.path.join(templates_dir, "mu_ics_counts.fits"), counts.shape)
-    mu_iso = _read_cube(os.path.join(templates_dir, "mu_iso_counts.fits"), counts.shape)
-    mu_ps = _read_cube(os.path.join(templates_dir, "mu_ps_counts.fits"), counts.shape)
-
-    # Flat bubbles template used in the baseline fit to build the bubbles image.
-    mu_flat = None
-    for name in (
-        "mu_bubbles_flat_binary_counts.fits",
-        "mu_bubbles_vertices_sca_full_counts.fits",
-        "mu_bubbles_flat_counts.fits",
-    ):
-        p = os.path.join(templates_dir, name)
-        if os.path.exists(p):
-            mu_flat = _read_cube(p, counts.shape)
-            break
-    if mu_flat is None:
-        raise RuntimeError("No flat bubbles mu template found (need mu_bubbles_flat_binary_counts.fits or legacy)")
-
-    mu_nfw = None
-    if args.include_nfw:
-        mu_nfw = _read_cube(os.path.join(templates_dir, "mu_nfw_counts.fits"), counts.shape)
-
-    mu_loopi = None
-    if args.include_loopi:
-        loop_path = None
-        for name in ("mu_loopI_counts.fits", "mu_loopi_counts.fits"):
-            p = os.path.join(templates_dir, name)
-            if os.path.exists(p):
-                loop_path = p
-                break
-        if loop_path is None:
-            raise RuntimeError("Requested Loop I but no mu_loopI_counts.fits found")
-        mu_loopi = _read_cube(loop_path, counts.shape)
-
-    if args.ext_mask:
-        ext_keep3d = load_mask_any_shape(args.ext_mask, counts.shape)
+    if args.expo_sampling == "center":
+        expo = resample_exposure_logE_interp(expo_raw, E_expo_mev, Ectr_mev)
+        expo_comment = "Exposure at CCUBE bin centers (logE interp, clamped)."
     else:
-        ext_keep3d = np.ones_like(counts, bool)
+        expo_min = resample_exposure_logE_interp(expo_raw, E_expo_mev, Emin_mev)
+        expo_max = resample_exposure_logE_interp(expo_raw, E_expo_mev, Emax_mev)
+        expo = 0.5 * (expo_min + expo_max)
+        expo_comment = "Exposure = 0.5*(expo(Emin)+expo(Emax)) with logE interp (clamped)."
 
-    if args.ps_mask:
-        ps_keep3d = load_mask_any_shape(args.ps_mask, counts.shape)
+    # --- lon/lat grid + ROI/disk mask (only zeroing; no renorm) ---
+    yy, xx = np.mgrid[:ny, :nx]
+    lon, lat = wcs.pixel_to_world_values(xx, yy)
+    lon = ((lon + 180.0) % 360.0) - 180.0
+
+    roi = (np.abs(lon) <= args.roi_lon) & (np.abs(lat) <= args.roi_lat)
+    if args.mask_disk and args.mask_disk > 0:
+        roi = roi & (np.abs(lat) >= args.mask_disk)
+
+    # --- pick target energy bin (~4.3 GeV) ---
+    k0 = pick_energy_index(Ectr_mev, args.target_gev)
+    E0_gev = Ectr_mev[k0] / 1000.0
+    print(f"[info] Using k0={k0} with Ectr={E0_gev:.3f} GeV (target {args.target_gev:.3f} GeV)")
+
+    # --- build residual map at k0 ---
+    if args.residual_map is not None:
+        R = read_2d_fits(args.residual_map)
+        if R.shape != (ny, nx):
+            raise RuntimeError(f"Residual map shape {R.shape} != CCUBE spatial {(ny, nx)}")
+        residual_comment = f"Residual map read from {os.path.basename(args.residual_map)}"
     else:
-        ps_keep3d = np.ones_like(counts, bool)
+        with fits.open(args.model_mu) as hm:
+            model_cube = np.array(hm[0].data, dtype=np.float64)
+        if model_cube.shape != counts_cube.shape:
+            raise RuntimeError(f"Model cube shape {model_cube.shape} != counts cube {counts_cube.shape}")
+        R = counts_cube[k0] - model_cube[k0]
+        residual_comment = f"Residual map computed as counts[k0]-model_mu[k0] from {os.path.basename(args.model_mu)}"
 
-    bubble2d = None
-    if args.bubble_mask:
-        bm = fits.getdata(args.bubble_mask).astype(bool)
-        if bm.shape != (ny, nx):
-            raise RuntimeError("bubble-mask must be (ny,nx)")
-        bubble2d = bm
+    # apply ROI mask (zero outside)
+    Rm = np.zeros_like(R)
+    Rm[roi] = R[roi]
 
-    # ---- Totani-style construction from a single reference energy bin ----
-    Ectr_gev = Ectr_mev / 1000.0
-    k_ref = int(np.argmin(np.abs(Ectr_gev - float(args.ref_gev))))
-    print(f"[FB_POSNEG] using reference bin k_ref={k_ref} (Ectr={Ectr_gev[k_ref]:.6g} GeV)")
+    # Totani split by sign
+    fb_pos_2d = np.clip(Rm, 0.0, np.inf)
+    fb_neg_2d = np.clip(-Rm, 0.0, np.inf)
 
-    mask2d = roi2d & disk2d & ext_keep3d[k_ref] & ps_keep3d[k_ref]
-    if bubble2d is not None:
-        mask2d = mask2d & bubble2d
+    # optional normalization (OFF by default)
+    if args.norm == "roi-sum":
+        s_pos = float(np.nansum(fb_pos_2d[roi]))
+        s_neg = float(np.nansum(fb_neg_2d[roi]))
+        if not np.isfinite(s_pos) or s_pos <= 0:
+            raise RuntimeError("FB_pos is zero in ROI; cannot roi-sum normalize.")
+        if not np.isfinite(s_neg) or s_neg <= 0:
+            raise RuntimeError("FB_neg is zero in ROI; cannot roi-sum normalize.")
+        fb_pos_2d /= s_pos
+        fb_neg_2d /= s_neg
 
-    denom = expo[k_ref] * omega * dE_mev[k_ref]
-    good = mask2d & np.isfinite(denom) & (denom > 0) & np.isfinite(counts[k_ref])
+    # --- build energy-independent counts templates by repeating the 2D maps across energy bins ---
+    mu_pos = np.broadcast_to(fb_pos_2d[None, :, :], (nE, ny, nx)).astype(np.float64).copy()
+    mu_neg = np.broadcast_to(fb_neg_2d[None, :, :], (nE, ny, nx)).astype(np.float64).copy()
 
-    # Baseline components including FLAT bubbles.
-    comps = [mu_gas[k_ref], mu_ics[k_ref], mu_iso[k_ref], mu_ps[k_ref]]
-    if mu_nfw is not None:
-        comps.append(mu_nfw[k_ref])
-    if mu_loopi is not None:
-        comps.append(mu_loopi[k_ref])
-    comps.append(mu_flat[k_ref])
-    i_flat = len(comps) - 1
+    # --- convert to dnde / E2dnde using your pipeline convention ---
+    omega = pixel_solid_angle_map(wcs, ny, nx, args.binsz)
+    denom = expo * omega[None, :, :] * dE_mev[:, None, None]
 
-    A = fit_bin_weighted_nnls(counts[k_ref], comps, good, eps=1.0)
+    def mu_to_dnde(mu):
+        dnde = np.full_like(mu, np.nan, dtype=np.float64)
+        ok = np.isfinite(denom) & (denom > 0)
+        dnde[ok] = mu[ok] / denom[ok]
+        e2dnde = dnde * (Ectr_mev[:, None, None] ** 2)
+        return dnde, e2dnde
 
-    model = np.zeros((ny, nx), dtype=float)
-    for a, mu in zip(A, comps):
-        model += a * mu
+    dnde_pos, e2_pos = mu_to_dnde(mu_pos)
+    dnde_neg, e2_neg = mu_to_dnde(mu_neg)
 
-    resid_counts = counts[k_ref] - model
+    # --- write outputs ---
+    def _write_cube(path, data, bunit, comments):
+        phdu = fits.PrimaryHDU(data.astype(np.float32), header=hdr)
+        phdu.header["BUNIT"] = bunit
+        for c in comments:
+            phdu.header["COMMENT"] = c
+        fits.HDUList([phdu, eb_hdu]).writeto(path, overwrite=True)
 
-    # Bubbles image counts = (best-fit flat bubbles counts) + residual counts
-    bubbles_img_counts = (A[i_flat] * mu_flat[k_ref]) + resid_counts
+    tag = f"_E{args.target_gev:g}GeV_k{k0}_roiL{args.roi_lon:g}_roiB{args.roi_lat:g}"
+    if args.mask_disk and args.mask_disk > 0:
+        tag += f"_maskDisk{args.mask_disk:g}"
+    tag += f"_norm{args.norm}"
+    tag += f"_expo{args.expo_sampling}"
 
-    bubbles_img_flux = np.full((ny, nx), np.nan, dtype=float)
-    bubbles_img_flux[good] = bubbles_img_counts[good] / denom[good]
+    out_mu_pos   = os.path.join(args.outdir, f"mu_fbpos{tag}_counts.fits")
+    out_mu_neg   = os.path.join(args.outdir, f"mu_fbneg{tag}_counts.fits")
+    out_dnde_pos = os.path.join(args.outdir, f"fbpos{tag}_dnde.fits")
+    out_dnde_neg = os.path.join(args.outdir, f"fbneg{tag}_dnde.fits")
+    out_e2_pos   = os.path.join(args.outdir, f"fbpos{tag}_E2dnde.fits")
+    out_e2_neg   = os.path.join(args.outdir, f"fbneg{tag}_E2dnde.fits")
 
-    pos_flux = np.where(np.isfinite(bubbles_img_flux) & (bubbles_img_flux > 0), bubbles_img_flux, 0.0)
-    neg_flux = np.where(np.isfinite(bubbles_img_flux) & (bubbles_img_flux < 0), -bubbles_img_flux, 0.0)
+    comments = [
+        "Totani-style FB templates from single-bin residual split by sign:",
+        "FB_pos = max(R,0), FB_neg = max(-R,0), where R is residual at ~4.3 GeV.",
+        f"Using k0={k0}, Ectr={E0_gev:.3f} GeV (closest to target {args.target_gev:.3f} GeV).",
+        residual_comment,
+        f"ROI: |l|<={args.roi_lon:g}, |b|<={args.roi_lat:g}" + (f", with |b|>={args.mask_disk:g} masked" if args.mask_disk and args.mask_disk > 0 else ""),
+        f"Normalization: {args.norm} (default none = no rescaling).",
+        "Energy-independent spatial map repeated across all energy bins (as in Totani).",
+        expo_comment,
+        "mu = dnde * exposure * Omega_pix * dE (for the derived dnde products).",
+    ]
 
-    # Energy-independent spatial templates (normalised) derived from the reference map.
-    spatial_pos = np.zeros((ny, nx), dtype=float)
-    spatial_neg = np.zeros((ny, nx), dtype=float)
-    spatial_pos[good] = pos_flux[good]
-    spatial_neg[good] = neg_flux[good]
+    _write_cube(out_mu_pos, mu_pos, "counts", ["FB_pos expected counts-template (shape-only)."] + comments)
+    _write_cube(out_mu_neg, mu_neg, "counts", ["FB_neg expected counts-template (shape-only)."] + comments)
+    _write_cube(out_dnde_pos, dnde_pos, "ph cm-2 s-1 sr-1 MeV-1", comments)
+    _write_cube(out_dnde_neg, dnde_neg, "ph cm-2 s-1 sr-1 MeV-1", comments)
+    _write_cube(out_e2_pos, e2_pos, "MeV cm-2 s-1 sr-1", ["E^2 dN/dE derived using Ectr^2."] + comments)
+    _write_cube(out_e2_neg, e2_neg, "MeV cm-2 s-1 sr-1", ["E^2 dN/dE derived using Ectr^2."] + comments)
 
-    s_pos = float(np.nansum(spatial_pos[good]))
-    s_neg = float(np.nansum(spatial_neg[good]))
-    if not np.isfinite(s_pos) or s_pos <= 0:
-        raise RuntimeError("FB_POS normalisation failed (no positive pixels in bubbles image)")
-    if not np.isfinite(s_neg) or s_neg <= 0:
-        raise RuntimeError("FB_NEG normalisation failed (no negative pixels in bubbles image)")
-    spatial_pos /= s_pos
-    spatial_neg /= s_neg
+    print("✓ wrote", out_mu_pos)
+    print("✓ wrote", out_mu_neg)
+    print("✓ wrote", out_dnde_pos)
+    print("✓ wrote", out_dnde_neg)
+    print("✓ wrote", out_e2_pos)
+    print("✓ wrote", out_e2_neg)
 
-    # Build dnde/mu products for all energies using standard form.
-    pos_dnde = np.empty((nE, ny, nx), dtype=float)
-    neg_dnde = np.empty((nE, ny, nx), dtype=float)
-    for k in range(nE):
-        pos_dnde[k] = spatial_pos / (omega * dE_mev[k])
-        neg_dnde[k] = spatial_neg / (omega * dE_mev[k])
-
-    pos_E2 = pos_dnde * (Ectr_mev[:, None, None] ** 2)
-    neg_E2 = neg_dnde * (Ectr_mev[:, None, None] ** 2)
-
-    pos_mu = pos_dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
-    neg_mu = neg_dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
-
-    out_pos_dnde = os.path.join(args.outdir_data, "bubbles_pos_dnde.fits")
-    out_neg_dnde = os.path.join(args.outdir_data, "bubbles_neg_dnde.fits")
-    out_pos_E2 = os.path.join(args.outdir_data, "bubbles_pos_E2dnde.fits")
-    out_neg_E2 = os.path.join(args.outdir_data, "bubbles_neg_E2dnde.fits")
-    out_pos_mu = os.path.join(args.outdir_data, "mu_bubbles_pos_counts.fits")
-    out_neg_mu = os.path.join(args.outdir_data, "mu_bubbles_neg_counts.fits")
-
-    _write_primary_with_bunit(out_pos_dnde, pos_dnde, hdr, "ph cm-2 s-1 sr-1 MeV-1")
-    _write_primary_with_bunit(out_neg_dnde, neg_dnde, hdr, "ph cm-2 s-1 sr-1 MeV-1")
-    _write_primary_with_bunit(out_pos_E2, pos_E2, hdr, "MeV cm-2 s-1 sr-1")
-    _write_primary_with_bunit(out_neg_E2, neg_E2, hdr, "MeV cm-2 s-1 sr-1")
-    _write_primary_with_bunit(out_pos_mu, pos_mu, hdr, "counts")
-    _write_primary_with_bunit(out_neg_mu, neg_mu, hdr, "counts")
+    # quick sanity prints at the construction energy
+    print("[sanity] sum FB_pos_2d (ROI):", float(np.nansum(fb_pos_2d[roi])))
+    print("[sanity] sum FB_neg_2d (ROI):", float(np.nansum(fb_neg_2d[roi])))
 
 
 if __name__ == "__main__":

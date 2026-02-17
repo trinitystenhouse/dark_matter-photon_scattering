@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
 """
-Build an NFW (rho^p) template on the counts CCUBE grid.
+Build an NFW (rho^p) template on the counts CCUBE grid using the *explicit LOS integral*:
+
+  T_p(l,b) ∝ ∫_0^{smax} ρ[r(l,b,s)]^p ds
+
+with
+  r(l,b,s) = sqrt(R0^2 + s^2 - 2 R0 s cos b cos l)
+
+This matches the description in Totani-style analyses: pick NFW params, pick p (1,2,2.5),
+project along the line of sight, and rasterize into the CCUBE pixel grid.
 
 Outputs (same conventions as your PS template):
   - nfw*_dnde.fits      : dN/dE  [ph cm^-2 s^-1 sr^-1 MeV^-1]
   - nfw*_E2dnde.fits    : E^2 dN/dE [MeV cm^-2 s^-1 sr^-1]
   - mu_nfw*_counts.fits : expected counts per bin per pixel [counts]
 
-Key fix vs your previous version:
-  ✅ Exposure resampling is now deterministic and explicit: linear interpolation in log(E),
-     clamped to the exposure energy range, evaluated at CCUBE bin CENTERS by default.
-  ✅ (Optional) You can switch to edge-mean exposure per bin (mean of expo(Emin), expo(Emax))
-     which sometimes matches older pipelines.
+Notes / conventions:
+- "pheno" mode: mu is just the *shape* (energy-independent) repeated over E bins.
+- Exposure sampling/resampling stays exactly as you had (logE interpolation, center or edge-mean).
+- Spatial normalisation options:
+    (A) Totani-like: normalize by *Galactic pole* value so T_p(b=±90°)=1.
+    (B) Your fitter-like: normalize so sum over ROI pixels = 1.
+  Default below: do pole-normalize FIRST, then (optionally) ROI-sum normalize.
 
-Notes:
-- Spatial template is normalised so sum over ROI pixels = 1 (pixel-sum, as you had).
-- Spectrum is unit-normalised over bins (sum_k Phi_bin = 1 ph/cm^2/s).
-  Fit coefficient then corresponds to integrated flux over the energy range.
+NFW parameters default to Via Lactea II-like values used by Totani:
+  rs = 21 kpc, rvir = 402 kpc, R0 = 8 kpc
+  rhos given in Msun/kpc^3 (units irrelevant for shape-only templates)
 """
 
 import os
@@ -25,16 +34,140 @@ import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from make_nfw import make_nfw_template, make_nfw_rho25_template
 from totani_helpers.totani_io import (
     pixel_solid_angle_map,
     read_expcube_energies_mev,
     resample_exposure_logE_interp,
 )
 
+# ----------------------------
+# NFW + LOS projection helpers
+# ----------------------------
+
+def rho_nfw(r_kpc, rs_kpc=21.0, rhos=8.1e6, gamma=1.0):
+    """
+    Generalised NFW density in arbitrary units (default rhos in Msun/kpc^3):
+      rho(r) = rhos * x^{-gamma} * (1+x)^{gamma-3}, x=r/rs
+    For standard NFW, gamma=1.
+    """
+    x = np.maximum(r_kpc / rs_kpc, 1e-12)
+    return rhos * (x ** (-gamma)) * ((1.0 + x) ** (gamma - 3.0))
+
+
+def los_r_kpc(lon_deg, lat_deg, s_kpc, R0_kpc=8.0):
+    """
+    Galactocentric radius for LOS distance s (kpc), for given lon/lat in degrees.
+    Uses lon in [-180,180] convention (cos handles either).
+    """
+    l = np.deg2rad(lon_deg)
+    b = np.deg2rad(lat_deg)
+    cospsi = np.cos(b) * np.cos(l)
+    # r^2 = R0^2 + s^2 - 2 R0 s cospsi
+    r2 = (R0_kpc * R0_kpc) + (s_kpc * s_kpc) - (2.0 * R0_kpc * s_kpc * cospsi)
+    return np.sqrt(np.maximum(r2, 0.0))
+
+
+def make_los_grid_kpc(rvir_kpc=402.0, R0_kpc=8.0, n_s=2048, smax_kpc=None):
+    """
+    Build a 1D LOS distance grid s in kpc and weights ds for integration.
+    We integrate from s=0 to s=smax. If smax not provided, use R0 + rvir.
+
+    Uses a mixed grid: dense at small s (log), then linear tail.
+    This reduces error near the GC without insane n_s.
+    """
+    if smax_kpc is None:
+        smax_kpc = R0_kpc + rvir_kpc  # safely beyond far edge for most directions
+
+    # fraction for log portion
+    f_log = 0.6
+    n_log = max(16, int(f_log * n_s))
+    n_lin = max(16, n_s - n_log)
+
+    s_min = 1e-6  # kpc
+    s_break = min(5.0, 0.2 * smax_kpc)  # put breakpoint at a few kpc-ish
+
+    s_log = np.geomspace(s_min, s_break, n_log, endpoint=False)
+    s_lin = np.linspace(s_break, smax_kpc, n_lin)
+
+    s = np.concatenate([s_log, s_lin])
+    ds = np.diff(s)
+    # for simple Riemann: use midpoints
+    s_mid = 0.5 * (s[:-1] + s[1:])
+    return s_mid, ds
+
+
+def los_integral_rhopow_map(
+    lon2d,
+    lat2d,
+    rho_power=2.0,
+    gamma=1.0,
+    rs_kpc=21.0,
+    rhos=8.1e6,
+    R0_kpc=8.0,
+    rvir_kpc=402.0,
+    n_s=2048,
+    smax_kpc=None,
+    chunk=8,
+):
+    """
+    Compute J_p(l,b) = ∫ rho(r(l,b,s))^p ds on a 2D lon/lat grid.
+
+    chunk: process in lat-stripes to limit memory
+    """
+    ny, nx = lon2d.shape
+    J = np.zeros((ny, nx), dtype=np.float64)
+
+    s_mid, ds = make_los_grid_kpc(rvir_kpc=rvir_kpc, R0_kpc=R0_kpc, n_s=n_s, smax_kpc=smax_kpc)
+
+    # stripe over y to avoid allocating huge (ny,nx,ns)
+    for y0 in range(0, ny, chunk):
+        y1 = min(ny, y0 + chunk)
+        lon = lon2d[y0:y1, :]
+        lat = lat2d[y0:y1, :]
+
+        acc = np.zeros((y1 - y0, nx), dtype=np.float64)
+
+        # integrate with simple midpoint rule
+        for si, dsi in zip(s_mid, ds):
+            r = los_r_kpc(lon, lat, si, R0_kpc=R0_kpc)
+            rho = rho_nfw(r, rs_kpc=rs_kpc, rhos=rhos, gamma=gamma)
+            acc += (rho ** rho_power) * dsi
+
+        J[y0:y1, :] = acc
+
+    return J
+
+
+def pole_normalization_value(
+    rho_power=2.0,
+    gamma=1.0,
+    rs_kpc=21.0,
+    rhos=8.1e6,
+    R0_kpc=8.0,
+    rvir_kpc=402.0,
+    n_s=4096,
+    smax_kpc=None,
+):
+    """
+    Compute J_p at the Galactic pole (b=+90 deg). There cos b = 0, so r = sqrt(R0^2 + s^2).
+    This matches the "normalize to GP" convention used to quote pole LOS integrals.
+    """
+    s_mid, ds = make_los_grid_kpc(rvir_kpc=rvir_kpc, R0_kpc=R0_kpc, n_s=n_s, smax_kpc=smax_kpc)
+    r = np.sqrt((R0_kpc * R0_kpc) + (s_mid * s_mid))
+    rho = rho_nfw(r, rs_kpc=rs_kpc, rhos=rhos, gamma=gamma)
+    Jpole = np.sum((rho ** rho_power) * ds)
+    return float(Jpole)
+
+
+# ----------------------------
+# Main script
+# ----------------------------
 
 def main():
     ap = argparse.ArgumentParser()
+
+    ap.add_argument("--mode", choices=["pheno"], default="pheno")  # keep as you had; "physical" removed here
+
     ap.add_argument("--counts", default=None, help="Counts CCUBE (authoritative WCS + EBOUNDS)")
     ap.add_argument("--expo", default=None, help="Exposure cube (expcube)")
     ap.add_argument("--outdir", default=None)
@@ -43,22 +176,34 @@ def main():
     ap.add_argument("--roi-lon", type=float, default=60.0)
     ap.add_argument("--roi-lat", type=float, default=60.0)
 
-    ap.add_argument("--halo-gamma", type=float, default=1.25)
-    ap.add_argument("--rho-power", type=float, default=2.5)
-    ap.add_argument("--n-s", type=int, default=512)
-    ap.add_argument("--chunk", type=int, default=8)
-    
-    # Physical DM parameters
-    ap.add_argument("--dm-mass-gev", type=float, default=100.0, help="DM particle mass [GeV]")
-    ap.add_argument("--sigmav", type=float, default=3e-26, help="Annihilation cross-section [cm^3/s]")
-    ap.add_argument("--channel", type=str, default="bb", choices=["bb", "tautau", "WW", "mumu"], help="Annihilation channel")
+    # NFW / LOS parameters
+    ap.add_argument("--rho-power", type=float, default=2.5, help="p in ∫rho^p ds (e.g. 1,2,2.5)")
+    ap.add_argument("--gamma", type=float, default=1.0, help="inner slope gamma for gNFW (gamma=1 is NFW)")
+    ap.add_argument("--rs-kpc", type=float, default=21.0)
+    ap.add_argument("--rhos", type=float, default=8.1e6, help="density scale (units irrelevant in pheno mode)")
+    ap.add_argument("--R0-kpc", type=float, default=8.0)
+    ap.add_argument("--rvir-kpc", type=float, default=402.0)
+    ap.add_argument("--smax-kpc", type=float, default=None, help="LOS upper limit; default is R0+rvir")
 
+    ap.add_argument("--n-s", type=int, default=2048, help="LOS grid resolution")
+    ap.add_argument("--chunk", type=int, default=8, help="stripe height for memory control")
+
+    # Normalisation choices
+    ap.add_argument(
+        "--norm",
+        choices=["pole", "roi-sum", "pole+roi-sum"],
+        default="pole+roi-sum",
+        help="How to normalize the spatial template.",
+    )
+
+    # Exposure sampling
     ap.add_argument(
         "--expo-sampling",
         choices=["center", "edge-mean"],
         default="center",
         help="How to evaluate exposure per CCUBE bin: at bin center, or mean of exposure at (Emin,Emax).",
     )
+
     args = ap.parse_args()
 
     repo_dir = os.environ["REPO_PATH"]
@@ -69,15 +214,21 @@ def main():
     outdir = args.outdir or os.path.join(data_dir, "processed", "templates")
     os.makedirs(outdir, exist_ok=True)
 
-    suffix = f"_rho{args.rho_power:g}_g{args.halo_gamma:g}"
+    suffix = (
+        f"_NFW_g{args.gamma:g}_rho{args.rho_power:g}"
+        f"_rs{args.rs_kpc:g}_R0{args.R0_kpc:g}_rvir{args.rvir_kpc:g}"
+        f"_ns{args.n_s:d}"
+    )
+    suffix += f"_norm{args.norm}"
     if args.expo_sampling != "center":
         suffix += f"_expo{args.expo_sampling}"
+    suffix += "_pheno"
 
     out_dnde = os.path.join(outdir, f"nfw{suffix}_dnde.fits")
     out_e2dnde = os.path.join(outdir, f"nfw{suffix}_E2dnde.fits")
     out_mu = os.path.join(outdir, f"mu_nfw{suffix}_counts.fits")
 
-    # --- Read CCUBE header + EBOUNDS (authoritative energy binning) ---
+    # --- Read CCUBE header + EBOUNDS ---
     with fits.open(counts) as hc:
         hdr = hc[0].header
         wcs = WCS(hdr).celestial
@@ -86,7 +237,7 @@ def main():
         if "EBOUNDS" not in hc:
             raise RuntimeError("Counts CCUBE missing EBOUNDS extension.")
         eb = hc["EBOUNDS"].data
-        eb_hdu = hc["EBOUNDS"].copy()  # we'll copy into outputs for convenience
+        eb_hdu = hc["EBOUNDS"].copy()
 
     Emin_kev = np.array(eb["E_MIN"], dtype=float)
     Emax_kev = np.array(eb["E_MAX"], dtype=float)
@@ -97,7 +248,7 @@ def main():
     Ectr_mev = np.sqrt(Emin_mev * Emax_mev)
     nE = int(Ectr_mev.size)
 
-    # --- Read exposure cube + energies, resample to CCUBE binning ---
+    # --- Read exposure cube + resample to CCUBE E bins ---
     with fits.open(expo_path) as he:
         expo_raw = np.array(he[0].data, dtype=np.float64)
         E_expo_mev = read_expcube_energies_mev(he)
@@ -117,121 +268,65 @@ def main():
     if expo.shape[0] != nE:
         raise RuntimeError(f"Resampled exposure has {expo.shape[0]} planes, expected {nE}")
 
-    # DEBUG: save the resampled exposure used to build mu
-    out_expo_used = os.path.join(outdir, f"expo_used{suffix}.npy")
-    np.save(out_expo_used, expo.astype(np.float32))
-    print("✓ wrote", out_expo_used, "(resampled exposure used in mu)")
-    print("[DBG] expo used per-bin sum:", np.nansum(expo, axis=(1,2)))
-
-
     # --- lon/lat grid ---
     yy, xx = np.mgrid[:ny, :nx]
     lon, lat = wcs.pixel_to_world_values(xx, yy)
     lon = ((lon + 180.0) % 360.0) - 180.0
 
-    # --- spatial template ---
-    if (args.rho_power == 2.5) and (args.halo_gamma == 1.25):
-        nfw_spatial = make_nfw_rho25_template(lon, lat).astype(float)
-    else:
-        nfw_spatial = make_nfw_template(
-            lon,
-            lat,
-            gamma=args.halo_gamma,
-            rho_power=args.rho_power,
-            n_s=args.n_s,
-            chunk=args.chunk,
-        ).astype(float)
+    # --- Compute LOS-projected NFW template J_p(l,b) ---
+    J = los_integral_rhopow_map(
+        lon2d=lon,
+        lat2d=lat,
+        rho_power=args.rho_power,
+        gamma=args.gamma,
+        rs_kpc=args.rs_kpc,
+        rhos=args.rhos,
+        R0_kpc=args.R0_kpc,
+        rvir_kpc=args.rvir_kpc,
+        n_s=args.n_s,
+        smax_kpc=args.smax_kpc,
+        chunk=args.chunk,
+    )
 
+    # ROI mask (keep exactly as your pipeline)
     roi = (np.abs(lon) <= args.roi_lon) & (np.abs(lat) <= args.roi_lat)
-    nfw_spatial[~roi] = 0.0
+    J[~roi] = 0.0
 
-    # --- solid angle map (must match your fitter conventions) ---
+    # --- Normalization ---
+    if args.norm in ("pole", "pole+roi-sum"):
+        Jpole = pole_normalization_value(
+            rho_power=args.rho_power,
+            gamma=args.gamma,
+            rs_kpc=args.rs_kpc,
+            rhos=args.rhos,
+            R0_kpc=args.R0_kpc,
+            rvir_kpc=args.rvir_kpc,
+            n_s=max(4096, args.n_s),  # make pole norm stable
+            smax_kpc=args.smax_kpc,
+        )
+        if not np.isfinite(Jpole) or Jpole <= 0:
+            raise RuntimeError("Pole normalization integral is non-positive.")
+        J = J / Jpole
+
+    if args.norm in ("roi-sum", "pole+roi-sum"):
+        s_roi = float(np.nansum(J[roi]))
+        if not np.isfinite(s_roi) or s_roi <= 0:
+            raise RuntimeError("ROI sum normalization failed (template is zero in ROI).")
+        J = J / s_roi
+
+    nfw_spatial = J.astype(np.float64)
+
+    # --- solid angle map (match fitter conventions) ---
     omega = pixel_solid_angle_map(wcs, ny, nx, args.binsz)
-    
-    # --- Physical DM annihilation spectrum ---
-    # Use simple power-law approximation for annihilation spectrum
-    # For more accurate spectra, use PPPC4DMID tables or similar
-    dm_mass_gev = args.dm_mass_gev
-    sigmav = args.sigmav  # cm^3/s
-    
-    # Annihilation spectrum dN/dE (photons per annihilation per GeV)
-    # Simple approximation: power-law with cutoff at m_DM
-    Ectr_gev = Ectr_mev / 1000.0
-    
-    if args.channel == "bb":
-        # b-bbar: relatively hard spectrum, peaks around E ~ 0.1*m_DM
-        dNdE_per_annihilation = np.where(
-            Ectr_gev < dm_mass_gev,
-            20.0 * (Ectr_gev / dm_mass_gev)**(-1.5) * np.exp(-Ectr_gev / (0.3 * dm_mass_gev)),
-            0.0
-        )
-    elif args.channel == "tautau":
-        # tau+tau-: softer spectrum
-        dNdE_per_annihilation = np.where(
-            Ectr_gev < dm_mass_gev,
-            15.0 * (Ectr_gev / dm_mass_gev)**(-2.0) * np.exp(-Ectr_gev / (0.2 * dm_mass_gev)),
-            0.0
-        )
-    elif args.channel == "WW":
-        # W+W-: hard spectrum with features
-        dNdE_per_annihilation = np.where(
-            Ectr_gev < dm_mass_gev,
-            25.0 * (Ectr_gev / dm_mass_gev)**(-1.0) * np.exp(-Ectr_gev / (0.4 * dm_mass_gev)),
-            0.0
-        )
-    else:  # mumu
-        # mu+mu-: very soft, mostly low energy
-        dNdE_per_annihilation = np.where(
-            Ectr_gev < dm_mass_gev,
-            10.0 * (Ectr_gev / dm_mass_gev)**(-2.5) * np.exp(-Ectr_gev / (0.1 * dm_mass_gev)),
-            0.0
-        )
-    
-    # Convert to per MeV
-    dNdE_per_annihilation_MeV = dNdE_per_annihilation / 1000.0
-    
-    # Particle physics factor: Phi_pp = (1/4π) * (σv / 2m²) * dN/dE
-    # Units: [cm^3/s / GeV^2] * [1/MeV] = [cm^3 s^-1 GeV^-2 MeV^-1]
-    m_gev_sq = dm_mass_gev ** 2
-    Phi_pp = (sigmav / (8.0 * np.pi * m_gev_sq)) * dNdE_per_annihilation_MeV  # [cm^3 s^-1 GeV^-2 MeV^-1]
-    
-    # Convert GeV^-2 to MeV^-2 for consistency
-    Phi_pp = Phi_pp * 1e6  # [cm^3 s^-1 MeV^-2 MeV^-1] = [cm^3 s^-1 MeV^-3]
-    
-    # J-factor: line-of-sight integral of ρ² [GeV^2 cm^-5]
-    # For NFW profile, J ~ 10^23 - 10^25 GeV^2 cm^-5 depending on direction
-    # We use the spatial template (already ρ^2.5 or similar) as the J-factor map
-    # Normalize to a typical J-factor value
-    # Typical J-factor for inner Galaxy: J ~ 10^24 GeV^2 cm^-5
-    J_typical_gev2_cm5 = 1e24
-    
-    # nfw_spatial is already proportional to ρ^rho_power
-    # For annihilation, we need ρ^2, so if rho_power != 2, we need to adjust
-    # For simplicity, assume nfw_spatial represents the relative J-factor distribution
-    # and normalize it to J_typical at the peak
-    J_map_gev2_cm5 = nfw_spatial * J_typical_gev2_cm5 / np.nanmax(nfw_spatial)
-    
-    # Convert J-factor to MeV^2 cm^-5
-    J_map_mev2_cm5 = J_map_gev2_cm5 * 1e6  # [MeV^2 cm^-5]
-    
-    # Differential flux: dΦ/dE = Phi_pp * J  [cm^3 s^-1 MeV^-3] * [MeV^2 cm^-5] = [cm^-2 s^-1 MeV^-1]
-    # This is already per steradian since J is integrated along line of sight
-    # Actually, we need to divide by solid angle to get per steradian
-    # dΦ/dE/dΩ = (Phi_pp * J) / (4π sr) for isotropic emission
-    # But J already accounts for the line-of-sight integral, so:
-    # dΦ/dE = Phi_pp * J  [cm^-2 s^-1 MeV^-1] (integrated over solid angle)
-    # To get per steradian: divide by pixel solid angle
-    
-    # Build intensity cube: dN/dE [ph cm^-2 s^-1 sr^-1 MeV^-1]
-    nfw_dnde = np.empty((nE, ny, nx), float)
-    for k in range(nE):
-        # Flux per pixel: Phi_pp[k] * J_map [cm^-2 s^-1 MeV^-1]
-        flux_per_pixel = Phi_pp[k] * J_map_mev2_cm5
-        # Intensity per steradian: flux / solid_angle
-        nfw_dnde[k] = flux_per_pixel / omega
 
+    # --- PHENO mode: energy-independent shape replicated across bins ---
+    mu_nfw = np.broadcast_to(nfw_spatial[None, :, :], (nE, ny, nx)).astype(np.float64).copy()
+
+    denom = expo * omega[None, :, :] * dE_mev[:, None, None]
+    nfw_dnde = np.full_like(mu_nfw, np.nan, dtype=np.float64)
+    ok = np.isfinite(denom) & (denom > 0)
+    nfw_dnde[ok] = mu_nfw[ok] / denom[ok]
     nfw_E2dnde = nfw_dnde * (Ectr_mev[:, None, None] ** 2)
-    mu_nfw = nfw_dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
 
     # -------------------------
     # Write outputs (include EBOUNDS so checkers don’t need counts file)
@@ -244,16 +339,21 @@ def main():
         hdul = fits.HDUList([phdu, eb_hdu])
         hdul.writeto(path, overwrite=True)
 
+    comments_main = [
+        "LOS-projected NFW template: J_p(l,b) = int rho(r(l,b,s))^p ds",
+        f"Profile: gNFW with gamma={args.gamma:g}, rs={args.rs_kpc:g} kpc, R0={args.R0_kpc:g} kpc, rvir={args.rvir_kpc:g} kpc",
+        f"rho_power p = {args.rho_power:g}",
+        f"LOS grid: n_s={args.n_s:d}, smax={args.smax_kpc if args.smax_kpc is not None else (args.R0_kpc + args.rvir_kpc):g} kpc",
+        f"Normalization: {args.norm}",
+        "ROI cut applied: |l|<=roi_lon and |b|<=roi_lat; outside ROI set to 0",
+        expo_comment,
+    ]
+
     _write_cube(
         out_dnde,
         nfw_dnde,
         "ph cm-2 s-1 sr-1 MeV-1",
-        [
-            f"Physical DM annihilation: gNFW (gamma={args.halo_gamma:g}) rho^{args.rho_power:g}",
-            f"DM mass = {args.dm_mass_gev} GeV, sigmav = {args.sigmav:.2e} cm^3/s, channel = {args.channel}",
-            f"J-factor normalization: {J_typical_gev2_cm5:.2e} GeV^2 cm^-5 at peak",
-            expo_comment,
-        ],
+        comments_main,
     )
 
     _write_cube(
@@ -262,7 +362,7 @@ def main():
         "MeV cm-2 s-1 sr-1",
         [
             "E^2 dN/dE version of NFW template",
-            f"(Derived from dnde using Ectr^2, where Ectr from CCUBE EBOUNDS geometric mean.)",
+            "(Derived from dnde using Ectr^2, where Ectr from CCUBE EBOUNDS geometric mean.)",
             expo_comment,
         ],
     )
@@ -280,9 +380,7 @@ def main():
     print("✓ wrote", out_dnde)
     print("✓ wrote", out_e2dnde)
     print("✓ wrote", out_mu)
-    print(f"Physical DM model: m_DM = {args.dm_mass_gev} GeV, sigmav = {args.sigmav:.2e} cm^3/s, channel = {args.channel}")
-    print(f"J-factor (peak): {J_typical_gev2_cm5:.2e} GeV^2 cm^-5")
-    print("mu_nfw total counts:", float(np.nansum(mu_nfw)))
+    print("mu_nfw total (shape units):", float(np.nansum(mu_nfw)))
     print("mu_nfw per-bin:", np.nansum(mu_nfw, axis=(1, 2)))
 
 
