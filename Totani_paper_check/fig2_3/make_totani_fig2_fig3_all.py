@@ -15,6 +15,7 @@ from totani_helpers.totani_io import (
     read_exposure,
     resample_exposure_logE,
 )
+from totani_helpers.cellwise_fit import fit_cellwise_poisson_mle_counts
 
 REPO_DIR = os.environ["REPO_PATH"]
 DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
@@ -805,8 +806,7 @@ def main():
     if args.ext_mask is not None and os.path.exists(str(args.ext_mask)):
         ext_keep3d = load_mask_any_shape(str(args.ext_mask), nE, ny, nx)
         srcmask = srcmask & ext_keep3d
-        m_roi = roi2d[None, :, :]
-        frac_masked = float(np.mean((~ext_keep3d)[m_roi])) if np.any(m_roi) else float("nan")
+        frac_masked = float(np.mean((~ext_keep3d)[:, roi2d])) if np.any(roi2d) else float("nan")
         print(f"[ext-mask] applying extended-source mask: {args.ext_mask} (masked frac in ROI={frac_masked:.4f})")
     else:
         print("[ext-mask] no extended-source mask applied")
@@ -821,7 +821,7 @@ def main():
     labels = ["GAS", "ICS", "ISO", "PS", "LOOPI", "FB_FLAT", "NFW"]
 
     # Load templates
-    labels = ["gas", "iso", "ps", "nfw_rho2.5_g1.25", "loopI", "ics", "bubbles_flat_binary"]
+    labels = ["gas", "iso", "ps", "nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno", "loopI", "ics", "fb_flat"]
 
     mu_list, headers = load_mu_templates_from_fits(
         template_dir=args.templates_dir,
@@ -943,15 +943,20 @@ def main():
     # Fit mask is the SAME for both figures: ROI including disk
     fit_mask3d = srcmask & roi2d[None, :, :]
 
-    cells, coeff_cells, info = fit_per_bin_poisson_mle_cellwise_counts(
+    res_fit = fit_cellwise_poisson_mle_counts(
         counts=counts,
-        templates=mu_list,      # your list of count templates
+        templates=mu_list,
         mask3d=fit_mask3d,
-        lon=lon, lat=lat,
-        roi_lon=args.roi_lon, roi_lat=args.roi_lat,
-        cell_deg=10.0,
+        lon=lon,
+        lat=lat,
+        roi_lon=float(args.roi_lon),
+        roi_lat=float(args.roi_lat),
+        cell_deg=float(args.cell_deg),
         nonneg=True,
     )
+    cells = res_fit["cells"]
+    coeff_cells = res_fit["coeff_cells"]
+    info = res_fit["info"]
 
 
     # Fig 2 outputs

@@ -19,6 +19,10 @@ from totani_helpers.totani_io import (  # noqa: E402
     read_expcube_energies_mev,
     resample_exposure_logE_interp,
 )
+from totani_helpers.cellwise_fit import (
+    fit_cellwise_poisson_mle_counts,
+    per_bin_total_counts_from_cellwise_coeffs,
+)
 
 
 REPO_DIR_DEFAULT = os.environ.get(
@@ -1046,7 +1050,7 @@ def main():
 
     nohalo_labels = ["ics", "iso", "gas", "ps", "loopI", "bubbles_flat_binary"]
     if (not args.reuse_nohalo) or (not os.path.exists(nohalo_out)):
-        cells, coeff_cells, _info = fit_per_bin_poisson_mle_cellwise_counts(
+        res_fit = fit_cellwise_poisson_mle_counts(
             counts=counts,
             templates=base_mu,
             mask3d=fit_mask3d,
@@ -1057,11 +1061,13 @@ def main():
             cell_deg=float(args.cell_deg),
             nonneg=True,
         )
+        cells = res_fit["cells"]
+        coeff_cells = res_fit["coeff_cells"]
 
-        totals = cellwise_coeffs_to_total_counts(
+        totals = per_bin_total_counts_from_cellwise_coeffs(
             cells=cells,
             coeff_cells=coeff_cells,
-            mu_list=base_mu,
+            templates=base_mu,
             mask3d=fit_mask3d,
         )
         with open(nohalo_out, "w") as f:
