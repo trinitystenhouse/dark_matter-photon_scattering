@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from astropy.io import fits
 from astropy.wcs import WCS
+from scipy.optimize import minimize
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from totani_helpers.totani_io import (
@@ -42,110 +43,311 @@ def load_mask_any_shape(mask_path, nE, ny, nx):
 def bunit_str(hdr):
     return str(hdr.get("BUNIT", "")).lower().replace("**", "")
 
+import os
+import glob
+import numpy as np
+from astropy.io import fits
+
+
+def load_mu_templates_from_fits(
+    template_dir,
+    labels,
+    filename_pattern="{label}.fits",   # or "{label}_template.fits"
+    hdu=0,
+    dtype=np.float32,
+    memmap=True,
+    require_same_shape=True,
+):
+    """
+    Load TRUE-counts template cubes (mu) from FITS files into mu_list.
+
+    Assumes each template FITS contains a data cube shaped like:
+        (nE, ny, nx)   OR   (nE, npix)
+    matching your counts cube.
+
+    Parameters
+    ----------
+    template_dir : str
+        Directory containing FITS templates.
+    labels : list[str]
+        Component labels, used to build filenames.
+    filename_pattern : str
+        How to build a filename from a label. Example:
+            "{label}.fits"
+            "mu_{label}.fits"
+            "{label}_mapcube.fits"
+    hdu : int
+        FITS HDU index holding the data.
+    dtype : numpy dtype
+        Cast output arrays to this dtype (float32 is usually plenty).
+    memmap : bool
+        Use FITS memmap to avoid loading everything at once.
+    require_same_shape : bool
+        If True, raises if templates don't all share the same shape.
+
+    Returns
+    -------
+    mu_list : list[np.ndarray]
+        List of template arrays in counts units.
+    headers : list[fits.Header]
+        Corresponding FITS headers (for WCS / energy metadata if needed).
+    """
+    mu_list = []
+    headers = []
+    shapes = []
+
+    for lab in labels:
+        path = os.path.join(template_dir, filename_pattern.format(label=lab))
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Template not found for '{lab}': {path}")
+
+        with fits.open(path, memmap=memmap) as hdul:
+            data = hdul[hdu].data
+            hdr = hdul[hdu].header
+
+        if data is None:
+            raise ValueError(f"No data in {path} (HDU {hdu})")
+
+        arr = np.asarray(data, dtype=dtype)
+
+        # Basic sanity: must be at least 2D with energy axis first
+        if arr.ndim < 2:
+            raise ValueError(f"Template '{lab}' has ndim={arr.ndim}, expected (nE, ...spatial...)")
+
+        mu_list.append(arr)
+        headers.append(hdr)
+        shapes.append(arr.shape)
+
+    if require_same_shape:
+        s0 = shapes[0]
+        for lab, s in zip(labels, shapes):
+            if s != s0:
+                raise ValueError(f"Shape mismatch: '{labels[0]}' {s0} vs '{lab}' {s}")
+
+    return mu_list, headers
+
+
+def load_mu_templates_by_glob(
+    template_dir,
+    glob_pattern="*.fits",
+    sort_key=None,
+    hdu=0,
+    dtype=np.float32,
+    memmap=True,
+):
+    """
+    Load all FITS templates matching a glob. Labels inferred from filenames.
+
+    Example:
+        mu_list, labels, headers = load_mu_templates_by_glob("templates/", "mu_*.fits")
+
+    Labels are inferred as the basename without extension.
+    """
+    paths = glob.glob(os.path.join(template_dir, glob_pattern))
+    if not paths:
+        raise FileNotFoundError(f"No FITS files found: {template_dir}/{glob_pattern}")
+
+    if sort_key is None:
+        paths = sorted(paths)
+    else:
+        paths = sorted(paths, key=sort_key)
+
+    labels = [os.path.splitext(os.path.basename(p))[0] for p in paths]
+
+    mu_list = []
+    headers = []
+    shapes = []
+
+    for path in paths:
+        with fits.open(path, memmap=memmap) as hdul:
+            data = hdul[hdu].data
+            hdr = hdul[hdu].header
+
+        if data is None:
+            raise ValueError(f"No data in {path} (HDU {hdu})")
+
+        arr = np.asarray(data, dtype=dtype)
+        mu_list.append(arr)
+        headers.append(hdr)
+        shapes.append(arr.shape)
+
+    # Enforce same shape
+    s0 = shapes[0]
+    for lab, s in zip(labels, shapes):
+        if s != s0:
+            raise ValueError(f"Shape mismatch: '{labels[0]}' {s0} vs '{lab}' {s}")
+
+    return mu_list, labels, headers
+
+
+def assert_templates_match_counts(counts, mu_list, labels=None):
+    """
+    Quick check: every template has same shape as counts.
+    """
+    counts = np.asarray(counts)
+    for j, mu in enumerate(mu_list):
+        mu = np.asarray(mu)
+        if mu.shape != counts.shape:
+            lab = labels[j] if labels is not None else f"template[{j}]"
+            raise ValueError(f"{lab} shape {mu.shape} does not match counts shape {counts.shape}")
+    return True
+
 
 # -------------------------
-# Template conversion
+# Spectra (counts-units only)
 # -------------------------
-def template_to_mu_and_E2(template, bunit, Ectr_mev, dE_mev, expo, omega):
+def data_E2_spectrum_counts(counts, expo, omega, dE_mev, Ectr_mev, mask3d):
     """
-    Returns:
-      mu_counts : predicted counts per pixel per bin
-      E2cube    : E^2 dN/dE [MeV cm^-2 s^-1 sr^-1] per pixel per bin
+    ROI-averaged data spectrum in E^2 dN/dE using a counts-space estimator.
 
-    Accepts:
-      - counts (mu_*_counts.fits)
-      - dN/dE  [ph cm^-2 s^-1 sr^-1 MeV^-1]
-      - E^2 dN/dE [MeV cm^-2 s^-1 sr^-1]
+    For each energy bin k:
+        C_k = sum_{ROI} counts[k]
+        D_k = sum_{ROI} expo[k] * omega * dE_k
+        I_k = C_k / D_k               [ph / (cm^2 s sr MeV)]
+        E2I = Ectr_k^2 * I_k
+
+    Poisson error:
+        sigma(I_k) = sqrt(C_k) / D_k
+        sigma(E2I) = Ectr_k^2 * sigma(I_k)
+
+    Inputs must be aligned in shape:
+      counts, expo, mask3d: (nE, ...spatial...)
+      omega: (...spatial...)
+      dE_mev, Ectr_mev: (nE,)
     """
-    bu = (bunit or "").lower().replace("**", "")
-    T = template.astype(float)
+    counts = np.asarray(counts, float)
+    expo   = np.asarray(expo, float)
+    omega  = np.asarray(omega, float)
+    dE_mev = np.asarray(dE_mev, float)
+    Ectr   = np.asarray(Ectr_mev, float)
+    mask3d = np.asarray(mask3d, bool)
 
-    # Counts template
-    if "counts" in bu:
-        mu = T
-        denom = expo * omega[None, :, :] * dE_mev[:, None, None]
-        dnde = np.full_like(mu, np.nan, float)
-        ok = denom > 0
-        dnde[ok] = mu[ok] / denom[ok]
-        E2 = dnde * (Ectr_mev[:, None, None] ** 2)
-        return mu, E2
+    if counts.shape != expo.shape or counts.shape != mask3d.shape:
+        raise ValueError("counts, expo, mask3d must have identical shapes (nE, ...spatial...)")
+    if omega.shape != counts.shape[1:]:
+        raise ValueError("omega must have spatial shape matching counts[0]")
+    if dE_mev.shape[0] != counts.shape[0] or Ectr.shape[0] != counts.shape[0]:
+        raise ValueError("dE_mev and Ectr_mev must have length nE")
 
-    # E^2 dN/dE template
-    looks_E2 = ("mev" in bu) and ("sr-1" in bu) and ("mev-1" not in bu) and ("ph" not in bu)
-    if looks_E2:
-        E2 = T
-        dnde = E2 / (Ectr_mev[:, None, None] ** 2)
-        mu = dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
-        return mu, E2
-
-    # dN/dE template (or unknown -> assume dN/dE)
-    dnde = T
-    E2 = dnde * (Ectr_mev[:, None, None] ** 2)
-    mu = dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
-    return mu, E2
-
-
-# -------------------------
-# Spectra + fitting
-# -------------------------
-def data_E2_spectrum(counts, expo, omega, dE_mev, Ectr_mev, mask3d):
-    """
-    Exposure-weighted estimator:
-      I_k = sum C / sum(expo * omega * dE)
-    then E^2 I_k and Poisson error.
-    """
     nE = counts.shape[0]
     y = np.full(nE, np.nan)
     yerr = np.full(nE, np.nan)
+
     for k in range(nE):
         m = mask3d[k]
-        C = np.nansum(counts[k][m])
-        D = np.nansum((expo[k] * omega * dE_mev[k])[m])
-        if D <= 0:
+        if not np.any(m):
             continue
+
+        C = float(np.nansum(counts[k][m]))
+        D = float(np.nansum((expo[k] * omega * dE_mev[k])[m]))
+        if not np.isfinite(D) or D <= 0:
+            continue
+
         I = C / D
-        Ierr = np.sqrt(C) / D if C > 0 else 0.0
-        y[k] = I * (Ectr_mev[k] ** 2)
-        yerr[k] = Ierr * (Ectr_mev[k] ** 2)
+        Ierr = (np.sqrt(C) / D) if C > 0 else 0.0
+
+        y[k] = I * (Ectr[k] ** 2)
+        yerr[k] = Ierr * (Ectr[k] ** 2)
+
     return y, yerr
 
 
-def model_E2_spectrum_from_mu(coeff_cells, cells, mu_list, expo, omega, dE_mev, Ectr_mev, mask3d):
-    """Compute E2 spectrum of fitted model (or any subset of components) using counts-space estimator.
-
-    Returns E2 spectrum for each component and for the full model, computed as:
-      I_k = sum(model_counts) / sum(expo*omega*dE)
-      E2_k = I_k * Ectr^2
+def model_E2_spectrum_from_cells_counts(
+    coeff_cells,
+    cells,
+    templates,
+    expo,
+    omega,
+    dE_mev,
+    Ectr_mev,
+    mask3d,
+):
     """
-    nE = mu_list[0].shape[0]
-    ncomp = len(mu_list)
+    ROI-averaged model spectrum in E^2 dN/dE from cellwise fitted coefficients,
+    assuming TRUE COUNTS templates with NO cell normalisation.
 
-    y_comp = np.full((ncomp, nE), np.nan)
+    Model counts in ROI for bin k:
+        C_j,k = sum_cells  a_{cell,k,j} * sum_{ROI∩cell} T_{j,k}
+        C_tot,k = sum_j C_j,k
+
+    Then:
+        I_k = C_tot,k / D_k, where D_k = sum_{ROI} expo*omega*dE
+        E2I_k = Ectr_k^2 * I_k
+
+    Returns
+    -------
+    y_comp : (nComp, nE) array
+        Component-wise E^2 I spectra.
+    y_model : (nE,) array
+        Total E^2 I spectrum (sum over components).
+    """
+    coeff_cells = np.asarray(coeff_cells, float)
+    expo   = np.asarray(expo, float)
+    omega  = np.asarray(omega, float)
+    dE_mev = np.asarray(dE_mev, float)
+    Ectr   = np.asarray(Ectr_mev, float)
+    mask3d = np.asarray(mask3d, bool)
+
+    if not isinstance(templates, (list, tuple)) or len(templates) == 0:
+        raise ValueError("templates must be a non-empty list of arrays")
+    templates = [np.asarray(t, float) for t in templates]
+
+    nComp = len(templates)
+    nE = templates[0].shape[0]
+
+    # Shape checks
+    if any(t.shape != templates[0].shape for t in templates):
+        raise ValueError("all templates must have the same shape (nE, ...spatial...)")
+    if expo.shape != templates[0].shape or mask3d.shape != templates[0].shape:
+        raise ValueError("expo and mask3d must match template shape (nE, ...spatial...)")
+    if omega.shape != templates[0].shape[1:]:
+        raise ValueError("omega must match spatial shape of templates[0]")
+    if dE_mev.shape[0] != nE or Ectr.shape[0] != nE:
+        raise ValueError("dE_mev and Ectr_mev must have length nE")
+
+    if coeff_cells.ndim != 3 or coeff_cells.shape[1] != nE or coeff_cells.shape[2] != nComp:
+        raise ValueError(f"coeff_cells must have shape (nCells, nE, nComp)=(*,{nE},{nComp}), got {coeff_cells.shape}")
+    if len(cells) != coeff_cells.shape[0]:
+        raise ValueError("len(cells) must equal coeff_cells.shape[0]")
+
+    y_comp = np.full((nComp, nE), np.nan)
     y_model = np.full(nE, np.nan)
 
     for k in range(nE):
-        m = mask3d[k]
-        D = np.nansum((expo[k] * omega * dE_mev[k])[m])
-        if D <= 0:
+        m_roi = mask3d[k]
+        if not np.any(m_roi):
             continue
 
-        Cj = np.zeros(ncomp, float)
+        D = float(np.nansum((expo[k] * omega * dE_mev[k])[m_roi]))
+        if not np.isfinite(D) or D <= 0:
+            continue
+
+        Cj = np.zeros(nComp, dtype=float)
+
+        # accumulate counts per component from each cell
         for ci, cell2d in enumerate(cells):
-            cm = m & cell2d
+            cm = m_roi & cell2d
             if not np.any(cm):
                 continue
-            for j in range(ncomp):
-                Cj[j] += np.nansum((coeff_cells[ci, k, j] * mu_list[j][k])[cm])
+
+            a = coeff_cells[ci, k, :]  # (nComp,)
+            if not np.all(np.isfinite(a)):
+                continue
+
+            # Sum template counts inside this (ROI ∩ cell)
+            # then multiply by the cell coefficient
+            for j in range(nComp):
+                s = float(np.nansum(templates[j][k][cm]))
+                if np.isfinite(s) and s != 0.0:
+                    Cj[j] += a[j] * s
 
         Ctot = float(np.sum(Cj))
-        I = Ctot / D
-        y_model[k] = I * (Ectr_mev[k] ** 2)
-        for j in range(ncomp):
-            Ij = Cj[j] / D
-            y_comp[j, k] = Ij * (Ectr_mev[k] ** 2)
+
+        y_model[k] = (Ctot / D) * (Ectr[k] ** 2)
+        for j in range(nComp):
+            y_comp[j, k] = (Cj[j] / D) * (Ectr[k] ** 2)
 
     return y_comp, y_model
-
 
 def raw_counts_spectrum(counts, mask3d):
     nE = counts.shape[0]
@@ -206,63 +408,170 @@ def fit_per_bin_weighted_nnls(counts, mu_list, mask3d):
 
     return coeff
 
+def fit_per_bin_poisson_mle_cellwise_counts(
+    counts,
+    templates,   # list of arrays, each same shape as counts
+    mask3d,
+    lon,
+    lat,
+    roi_lon,
+    roi_lat,
+    cell_deg=10.0,
+    nonneg=True,
+    tiny=1e-30,
+    maxiter=200,
+    init="nnls",
+):
+    """
+    Cell-wise, per-energy-bin template fit in TRUE COUNTS UNITS using Poisson MLE.
 
-def fit_per_bin_weighted_nnls_cellwise(counts, mu_list, mask3d, lon, lat, roi_lon, roi_lat, cell_deg=10.0, weighting="uniform"):
+    For each cell and energy bin k, fits coefficients a_j such that:
+        mu_pix = sum_j a_j * T_j_pix
+    with y_pix ~ Poisson(mu_pix).
+
+    Assumptions (enforced):
+      - counts and every template are in counts-per-pixel (expected counts)
+      - no per-cell normalisation or alternative parameterisations
+      - supports optional non-negativity a_j >= 0 (default True)
+
+    Parameters
+    ----------
+    counts : array, shape (nE, ...spatial...)
+    templates : list of arrays, each shape == counts.shape
+    mask3d : bool array, shape == counts.shape
+    lon, lat : arrays, shape == counts.shape[1:]
+    roi_lon, roi_lat : floats, ROI half-widths (deg)
+    cell_deg : float, cell size (deg)
+    nonneg : bool, enforce a_j >= 0
+    tiny : float, floor for mu to avoid log(0)
+    maxiter : int, optimizer cap
+    init : {"nnls","lsq","ones"}, init strategy for MLE
+
+    Returns
+    -------
+    cells : list of bool arrays, shape == spatial
+        Cell masks.
+    coeff_cells : array, shape (nCells, nE, nComp)
+        Best-fit coefficients.
+    info : dict
+        success (nCells,nE), nll (nCells,nE), message (nCells,nE object)
+    """
+    counts = np.asarray(counts)
+    mask3d = np.asarray(mask3d, dtype=bool)
+    lon = np.asarray(lon)
+    lat = np.asarray(lat)
+
+    if counts.ndim < 2:
+        raise ValueError("counts must have shape (nE, ...spatial...)")
+    if mask3d.shape != counts.shape:
+        raise ValueError(f"mask3d must match counts shape {counts.shape}, got {mask3d.shape}")
+
     nE = counts.shape[0]
-    ncomp = len(mu_list)
+    spatial_shape = counts.shape[1:]
 
-    l_edges = np.arange(-roi_lon, roi_lon + 1e-6, cell_deg)
-    b_edges = np.arange(-roi_lat, roi_lat + 1e-6, cell_deg)
+    if lon.shape != spatial_shape or lat.shape != spatial_shape:
+        raise ValueError(f"lon/lat must match spatial shape {spatial_shape}, got lon {lon.shape}, lat {lat.shape}")
 
-    # list of (cell_mask_2d, coeff_cell[nE,ncomp])
+    if not isinstance(templates, (list, tuple)) or len(templates) == 0:
+        raise ValueError("templates must be a non-empty list of arrays")
+    ncomp = len(templates)
+
+    for j, T in enumerate(templates):
+        T = np.asarray(T)
+        if T.shape != counts.shape:
+            raise ValueError(f"templates[{j}] must match counts shape {counts.shape}, got {T.shape}")
+
+    # Build lon/lat cell masks
+    l_edges = np.arange(-roi_lon, roi_lon + 1e-9, cell_deg)
+    b_edges = np.arange(-roi_lat, roi_lat + 1e-9, cell_deg)
+
     cells = []
     for l0 in l_edges[:-1]:
         l1 = l0 + cell_deg
         in_l = (lon >= l0) & (lon < l1)
         for b0 in b_edges[:-1]:
             b1 = b0 + cell_deg
-            cell2d = in_l & (lat >= b0) & (lat < b1)
-            if not np.any(cell2d):
-                continue
-            cells.append(cell2d)
+            cell = in_l & (lat >= b0) & (lat < b1)
+            if np.any(cell):
+                cells.append(cell)
 
-    coeff_cells = np.zeros((len(cells), nE, ncomp), float)
+    nCells = len(cells)
+    coeff_cells = np.zeros((nCells, nE, ncomp), dtype=float)
+    success = np.zeros((nCells, nE), dtype=bool)
+    nll_vals = np.full((nCells, nE), np.nan, dtype=float)
+    messages = np.empty((nCells, nE), dtype=object)
+
+    def initial_guess(y, X):
+        if init == "ones":
+            return np.full(ncomp, max(np.sum(y) / max(ncomp, 1), 1.0), dtype=float)
+        if init == "lsq":
+            a, *_ = np.linalg.lstsq(X, y, rcond=None)
+            return np.clip(a, 0.0, None) if nonneg else a
+        # default: nnls
+        try:
+            a0, _ = nnls(X, y)
+            if not np.isfinite(a0).all() or np.all(a0 == 0):
+                a0 = np.full(ncomp, 1e-3, dtype=float)
+            return a0
+        except Exception:
+            return np.full(ncomp, 1e-3, dtype=float)
+
+    bounds = [(0.0, None)] * ncomp if nonneg else [(None, None)] * ncomp
 
     for ci, cell2d in enumerate(cells):
         for k in range(nE):
-            m2d = mask3d[k] & cell2d
-            y = counts[k][m2d].ravel()
-            if y.size == 0:
+            m = mask3d[k] & cell2d
+            if not np.any(m):
+                messages[ci, k] = "empty mask"
                 continue
 
-            X = np.vstack([mu[k][m2d].ravel() for mu in mu_list]).T
+            y = counts[k][m].astype(float).ravel()
+            X = np.stack([np.asarray(templates[j])[k][m].astype(float).ravel() for j in range(ncomp)], axis=1)
 
             good = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
             y = y[good]
             X = X[good]
+
             if y.size == 0:
+                messages[ci, k] = "no finite pixels"
                 continue
 
-            if weighting == "uniform":
-                Xw = X
-                yw = y
-            elif weighting == "poisson":
-                # chi^2 approx with Var~y
-                sw = 1.0 / np.sqrt(np.maximum(y, 1.0))
-                Xw = X * sw[:, None]
-                yw = y * sw
-            else:
-                raise ValueError(f"Unknown weighting='{weighting}'")
+            # Poisson NLL and gradient
+            def nll_and_grad(a):
+                mu = X @ a
+                mu = np.clip(mu, tiny, None)
+                nll = np.sum(mu - y * np.log(mu))  # drop constant ln(y!)
+                r = 1.0 - (y / mu)
+                grad = X.T @ r
+                return nll, grad
 
-            if HAVE_NNLS:
-                c, _ = nnls(Xw, yw)
-            else:
-                c, *_ = np.linalg.lstsq(Xw, yw, rcond=None)
-                c = np.clip(c, 0.0, None)
+            def fun(a):
+                v, _ = nll_and_grad(a)
+                return v
 
-            coeff_cells[ci, k] = c
+            def jac(a):
+                _, g = nll_and_grad(a)
+                return g
 
-    return cells, coeff_cells
+            a0 = initial_guess(y, X)
+
+            opt = minimize(
+                fun,
+                x0=a0,
+                jac=jac,
+                bounds=bounds,
+                method="L-BFGS-B",
+                options={"maxiter": int(maxiter)},
+            )
+
+            coeff_cells[ci, k] = opt.x
+            success[ci, k] = bool(opt.success)
+            nll_vals[ci, k] = float(opt.fun)
+            messages[ci, k] = str(opt.message)
+
+    info = {"success": success, "nll": nll_vals, "message": messages}
+    return cells, coeff_cells, info
+
 
 
 # -------------------------
@@ -413,6 +722,11 @@ def main():
         help="directory containing templates (mu_*_counts.fits etc)",
     )
     ap.add_argument(
+        "--ext-mask",
+        default=os.path.join(DATA_DIR, "processed", "templates", "mask_extended_sources.fits"),
+        help="Extended-source keep mask FITS (True=keep, False=masked). Applied before fitting components.",
+    )
+    ap.add_argument(
         "--outdir",
         default=os.path.join(os.path.dirname(__file__), "plots_fig2_3"),
     )
@@ -425,10 +739,13 @@ def main():
         "--weighting",
         default="uniform",
         choices=["uniform", "poisson"],
-        help="NNLS weighting scheme. 'uniform' is unweighted; 'poisson' uses 1/sqrt(counts) weights.",
+        help="pixel weighting scheme inside each fit cell",
     )
-
-    # For the FIT plot (you can change default to 0 if you want no disk cut)
+    ap.add_argument(
+        "--cell-normalize",
+        action="store_true",
+        help="normalize each template column to sum=1 within each (cell, energy) before NNLS (old behavior)",
+    )
     ap.add_argument("--disk-cut-fit", type=float, default=10.0, help="disk cut |b|>=X applied ONLY in fit plot")
     ap.add_argument("--mask-fit", default=None, help="optional mask FITS for fit plot (2D or 3D), True=keep")
 
@@ -472,10 +789,6 @@ def main():
     )
 
     # -------------------------
-    # (B) Fit + Totani Fig.2-style plot
-    # mask for fit = ROI box + disk cut + optional source mask
-    # -------------------------
-    # -------------------------
     # (B) Fit + Totani Fig.2/Fig.3-style plots
     #   Fig 2: |b| >= disk_cut
     #   Fig 3: |b| <  disk_cut
@@ -488,85 +801,138 @@ def main():
     else:
         srcmask = np.ones((nE, ny, nx), bool)
 
+    # Extended sources mask is applied BEFORE fitting any components
+    if args.ext_mask is not None and os.path.exists(str(args.ext_mask)):
+        ext_keep3d = load_mask_any_shape(str(args.ext_mask), nE, ny, nx)
+        srcmask = srcmask & ext_keep3d
+        m_roi = roi2d[None, :, :]
+        frac_masked = float(np.mean((~ext_keep3d)[m_roi])) if np.any(m_roi) else float("nan")
+        print(f"[ext-mask] applying extended-source mask: {args.ext_mask} (masked frac in ROI={frac_masked:.4f})")
+    else:
+        print("[ext-mask] no extended-source mask applied")
+
     # Resolve templates automatically
     tpl = resolve_templates(args.templates_dir)
+
+    print("[templates] dir:", args.templates_dir)
+    for k in ["GAS", "ICS", "ISO", "PS", "LOOPI", "FB_FLAT", "BUB_POS", "BUB_NEG", "NFW"]:
+        if k in tpl:
+            print(f"[templates] {k}: {tpl[k]}")
     labels = ["GAS", "ICS", "ISO", "PS", "LOOPI", "FB_FLAT", "NFW"]
 
-    # Load templates -> mu + E2 maps ONCE
-    mu_list = []
-    E2_list = []
-    for lab in labels:
-        path = tpl[lab]
-        with fits.open(path) as h:
-            T = h[0].data.astype(float)
-            bu = bunit_str(h[0].header)
+    # Load templates
+    labels = ["gas", "iso", "ps", "nfw_rho2.5_g1.25", "loopI", "ics", "bubbles_flat_binary"]
 
-        if T.shape != (nE, ny, nx):
-            raise RuntimeError(f"{lab} template shape {T.shape} != counts shape {(nE, ny, nx)}\nFile: {path}")
+    mu_list, headers = load_mu_templates_from_fits(
+        template_dir=args.templates_dir,
+        labels=labels,
+        filename_pattern="mu_{label}_counts.fits",  
+        hdu=0,
+    )
 
-        mu, E2 = template_to_mu_and_E2(T, bu, Ectr_mev, dE_mev, expo, omega)
-        mu_list.append(mu)
-        E2_list.append(E2)
-        print(f"[template] {lab}: {os.path.basename(path)} (BUNIT='{bu}')")
+    assert_templates_match_counts(counts, mu_list, labels)
 
-    def run_fit_and_plot(region_name, region2d, out_png, out_coeff_txt, cells, coeff_cells):
+
+    def run_fit_and_plot(
+        region_name,
+        region2d,
+        out_png,
+        out_coeff_txt,
+        cells,
+        coeff_cells,
+        counts,
+        expo,
+        omega,
+        dE_mev,
+        Ectr_mev,
+        Ectr_gev,
+        srcmask,
+        mu_list,
+        labels,
+    ):
         """
         region2d: boolean keep-mask (ny,nx)
-        Applies srcmask (3d) AND region2d (2d) to form final fit mask.
+        Uses mask3d_plot = srcmask (3d) AND region2d (2d) for spectra + output sums.
+        Assumes mu_list are TRUE COUNTS templates and coeff_cells multiply them directly.
         """
+
+        # Final 3D mask for THIS region
         mask3d_plot = srcmask & region2d[None, :, :]
 
-        # Data E2 spectrum in this region
-        data_y, data_yerr = data_E2_spectrum(counts, expo, omega, dE_mev, Ectr_mev, mask3d_plot)
-
-        # Component spectra from fitted counts (more robust closure than averaging E2 maps)
-        y_comp, y_model = model_E2_spectrum_from_mu(
-            coeff_cells,
-            cells,
-            mu_list,
-            expo,
-            omega,
-            dE_mev,
-            Ectr_mev,
-            mask3d_plot,
+        # Data E^2 spectrum in this region
+        E2_data, E2err_data = data_E2_spectrum_counts(
+            counts=counts,
+            expo=expo,
+            omega=omega,
+            dE_mev=dE_mev,
+            Ectr_mev=Ectr_mev,
+            mask3d=mask3d_plot,
         )
 
-        comp_specs = {lab: y_comp[j] for j, lab in enumerate(labels)}
-        comp_specs["MODEL_SUM"] = y_model
+        # Model/component E^2 spectra in this region (from fitted cell coefficients)
+        E2_comp, E2_model = model_E2_spectrum_from_cells_counts(
+            coeff_cells=coeff_cells,
+            cells=cells,
+            templates=mu_list,   # TRUE counts templates
+            expo=expo,
+            omega=omega,
+            dE_mev=dE_mev,
+            Ectr_mev=Ectr_mev,
+            mask3d=mask3d_plot,
+        )
 
-        frac = np.full(nE, np.nan)
-        for k in range(nE):
-            if np.isfinite(data_y[k]) and data_y[k] != 0 and np.isfinite(y_model[k]):
-                frac[k] = (data_y[k] - y_model[k]) / data_y[k]
+        # Pack for plotting
+        comp_specs = {lab: E2_comp[j] for j, lab in enumerate(labels)}
+        comp_specs["MODEL_SUM"] = E2_model
+
+        # Closure printout: (data - model)/data in each bin
+        frac_resid = np.full_like(E2_data, np.nan, dtype=float)
+        for k in range(len(E2_data)):
+            if np.isfinite(E2_data[k]) and E2_data[k] != 0 and np.isfinite(E2_model[k]):
+                frac_resid[k] = (E2_data[k] - E2_model[k]) / E2_data[k]
 
         print("[closure]", region_name)
-        for k in range(nE):
-            if not np.isfinite(frac[k]):
-                continue
-            print(f"  k={k:02d} E={Ectr_gev[k]:.3g} GeV frac_resid={(100*frac[k]):+.2f}%")
+        for k in range(len(E2_data)):
+            if np.isfinite(frac_resid[k]):
+                print(f"  k={k:02d} E={Ectr_gev[k]:.3g} GeV frac_resid={(100*frac_resid[k]):+.2f}%")
 
-        # Plot
+        # Plot (uses your plot_fit_fig2)
         plot_fit_fig2(
-            Ectr_gev, data_y, data_yerr, comp_specs, out_png,
-            title=region_name
+            Ectr_gev=Ectr_gev,
+            data_y=E2_data,
+            data_yerr=E2err_data,
+            comp_specs=comp_specs,
+            outpath=out_png,
+            title=region_name,
         )
 
-        # Save coeffs
-        # Save approximate per-bin coefficients by averaging cell coefficients weighted by number of used pixels.
+        # Save per-bin total COUNTS attributed to each component within this region
+        nE = counts.shape[0]
         with open(out_coeff_txt, "w") as f:
             f.write("# k  Ectr(GeV)  " + "  ".join(labels) + "\n")
             for k in range(nE):
-                wsum = 0.0
                 csum = np.zeros(len(labels), float)
+
                 for ci, cell2d in enumerate(cells):
                     cm = mask3d_plot[k] & cell2d
-                    npx = int(np.count_nonzero(cm))
-                    if npx <= 0:
+                    if not np.any(cm):
                         continue
-                    wsum += npx
-                    csum += npx * coeff_cells[ci, k]
-                cmean = csum / wsum if wsum > 0 else np.zeros(len(labels), float)
-                f.write(f"{k:02d} {Ectr_gev[k]:.6g} " + " ".join(f"{cmean[j]:.6g}" for j in range(len(labels))) + "\n")
+
+                    a = coeff_cells[ci, k, :]  # (nComp,)
+                    if not np.all(np.isfinite(a)):
+                        continue
+
+                    for j in range(len(labels)):
+                        s = float(np.nansum(mu_list[j][k][cm]))  # template counts in (cell ∩ region)
+                        if np.isfinite(s) and s != 0.0:
+                            csum[j] += float(a[j]) * s
+
+                f.write(
+                    f"{k:02d} {Ectr_gev[k]:.6g} " +
+                    " ".join(f"{csum[j]:.6g}" for j in range(len(labels))) +
+                    "\n"
+                )
+
         print("✓ wrote", out_coeff_txt)
 
     # Define regions
@@ -576,38 +942,60 @@ def main():
 
     # Fit mask is the SAME for both figures: ROI including disk
     fit_mask3d = srcmask & roi2d[None, :, :]
-    cells, coeff_cells = fit_per_bin_weighted_nnls_cellwise(
-        counts,
-        mu_list,
-        fit_mask3d,
-        lon,
-        lat,
-        args.roi_lon,
-        args.roi_lat,
-        cell_deg=args.cell_deg,
-        weighting=args.weighting,
+
+    cells, coeff_cells, info = fit_per_bin_poisson_mle_cellwise_counts(
+        counts=counts,
+        templates=mu_list,      # your list of count templates
+        mask3d=fit_mask3d,
+        lon=lon, lat=lat,
+        roi_lon=args.roi_lon, roi_lat=args.roi_lat,
+        cell_deg=10.0,
+        nonneg=True,
     )
 
+
+    # Fig 2 outputs
     out_fig2 = os.path.join(args.outdir, "totani_fig2_fit_components.png")
     out_c2   = os.path.join(args.outdir, "fit_coefficients_fig2_highlat.txt")
+
     run_fit_and_plot(
-        rf"|l|≤{args.roi_lon}°\n|b|≤{args.roi_lat}°",
-        fig2_region2d,
-        out_fig2,
-        out_c2,
-        cells,
-        coeff_cells,
+        region_name=rf"|l|≤{args.roi_lon}°\n|b|≤{args.roi_lat}°",
+        region2d=fig2_region2d,
+        out_png=out_fig2,
+        out_coeff_txt=out_c2,
+        cells=cells,
+        coeff_cells=coeff_cells,
+        counts=counts,
+        expo=expo,
+        omega=omega,
+        dE_mev=dE_mev,
+        Ectr_mev=Ectr_mev,
+        Ectr_gev=Ectr_gev,
+        srcmask=srcmask,
+        mu_list=mu_list,
+        labels=labels,
     )
 
+    # Fig 3 outputs
     out_fig3 = os.path.join(args.outdir, "totani_fig3_fit_components.png")
     out_c3   = os.path.join(args.outdir, "fit_coefficients_fig3_disk.txt")
+
     run_fit_and_plot(
-        rf"|l|≤{args.roi_lon}°\n{disk_cut}°≤|b|≤{args.roi_lat}°\n(fit including |b|<{disk_cut}°)",
-        fig3_region2d,
-        out_fig3,
-        out_c3,
-        cells,
-        coeff_cells,
+        region_name=rf"|l|≤{args.roi_lon}°\n{disk_cut}°≤|b|≤{args.roi_lat}°\n(fit including |b|<{disk_cut}°)",
+        region2d=fig3_region2d,
+        out_png=out_fig3,
+        out_coeff_txt=out_c3,
+        cells=cells,
+        coeff_cells=coeff_cells,
+        counts=counts,
+        expo=expo,
+        omega=omega,
+        dE_mev=dE_mev,
+        Ectr_mev=Ectr_mev,
+        Ectr_gev=Ectr_gev,
+        srcmask=srcmask,
+        mu_list=mu_list,
+        labels=labels,
     )
 
 
