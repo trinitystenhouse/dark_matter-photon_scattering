@@ -14,16 +14,18 @@ from scipy.optimize import minimize, nnls
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from totani_helpers.totani_io import (  # noqa: E402
+    lonlat_grids,
     load_mask_any_shape,
     pixel_solid_angle_map,
-    read_expcube_energies_mev,
-    resample_exposure_logE_interp,
+    read_counts_and_ebounds,
+    read_exposure,
+    resample_exposure_logE,
 )
 from totani_helpers.cellwise_fit import (
     fit_cellwise_poisson_mle_counts,
     per_bin_total_counts_from_cellwise_coeffs,
 )
-
+from totani_helpers.fit_utils import build_fit_mask3d
 
 REPO_DIR_DEFAULT = os.environ.get(
     "REPO_PATH",
@@ -753,10 +755,9 @@ def main():
     for k in ["GAS", "ICS", "ISO", "PS", "LOOPI", "FB_FLAT", "BUB_POS", "BUB_NEG", "NFW"]:
         if k in tpl:
             print(f"[templates] {k}: {tpl[k]}")
-    labels = ["GAS", "ICS", "ISO", "PS", "LOOPI", "FB_FLAT", "NFW"]
-
+            
     # Load templates
-    labels = ["gas", "iso", "ps", "nfw_rho2.5_g1.25", "loopI", "ics", "bubbles_flat_binary"]
+    labels = ["gas", "iso", "ps", "nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno", "loopI", "ics", "fb_flat"]
 
     mu_list, headers = load_mu_templates_from_fits(
         template_dir=args.templates_dir,
@@ -876,7 +877,12 @@ def main():
     fig3_region2d = roi2d & (np.abs(lat) >= disk_cut)  # Fig 3: exclude disk
 
     # Fit mask is the SAME for both figures: ROI including disk
-    fit_mask3d = srcmask & roi2d[None, :, :]
+    fit_mask3d = build_fit_mask3d(
+        roi2d=roi2d,
+        srcmask3d=srcmask,
+        counts=counts,
+        expo=expo,
+    )
 
     cells, coeff_cells, info = fit_per_bin_poisson_mle_cellwise_counts(
         counts=counts,
@@ -970,30 +976,22 @@ def main():
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
 
-    with fits.open(args.counts) as h:
-        counts = np.array(h[0].data, dtype=float)
-        hdr = h[0].header
-        eb = h["EBOUNDS"].data
-
+    counts, hdr, _Emin_mev, _Emax_mev, Ectr_mev, dE_mev = read_counts_and_ebounds(args.counts)
     nE, ny, nx = counts.shape
     wcs = WCS(hdr).celestial
-
-    Emin_mev = eb["E_MIN"].astype(float) / 1000.0
-    Emax_mev = eb["E_MAX"].astype(float) / 1000.0
-    dE_mev = (Emax_mev - Emin_mev)
-    Ectr_mev = np.sqrt(Emin_mev * Emax_mev)
     Ectr_gev = Ectr_mev / 1000.0
 
-    with fits.open(args.expo) as h:
-        expo_raw = np.array(h[0].data, dtype=np.float64)
-        E_expo_mev = read_expcube_energies_mev(h)
-    expo = resample_exposure_logE_interp(expo_raw, E_expo_mev, Ectr_mev)
-    omega = pixel_solid_angle_map(wcs, ny, nx, args.binsz)
+    expo_raw, E_expo_mev = read_exposure(args.expo)
+    if expo_raw.shape[1:] != (ny, nx):
+        raise RuntimeError(f"Exposure grid {expo_raw.shape[1:]} != counts grid {(ny, nx)}")
+    expo = resample_exposure_logE(expo_raw, E_expo_mev, Ectr_mev)
+    if expo.shape[0] != nE:
+        raise RuntimeError("Exposure resampling did not produce same nE as counts")
 
-    yy, xx = np.mgrid[:ny, :nx]
-    lon, lat = wcs.pixel_to_world_values(xx, yy)
-    lon_w = ((lon + 180.0) % 360.0) - 180.0
-    roi2d = (np.abs(lon_w) <= args.roi_lon) & (np.abs(lat) <= args.roi_lat)
+    omega = pixel_solid_angle_map(wcs, ny, nx, args.binsz)
+    lon, lat = lonlat_grids(wcs, ny, nx)
+
+    roi2d = (np.abs(lon) <= args.roi_lon) & (np.abs(lat) <= args.roi_lat)
     disk_keep = np.abs(lat) >= args.disk_cut
 
     k = int(np.argmin(np.abs(Ectr_gev - float(args.target_gev))))
@@ -1006,8 +1004,13 @@ def main():
     # For plotting, we grey-out the masked pixels at the target energy bin
     extended_sources_mask2d = roi2d & disk_keep & (~ext_keep3d[k])
 
-    # Fit mask is energy-dependent because the extended-source mask is energy-dependent
-    fit_mask3d = (roi2d & disk_keep)[None, :, :] & ext_keep3d
+    fit_mask3d = build_fit_mask3d(
+        roi2d=roi2d,
+        srcmask3d=ext_keep3d,
+        counts=counts,
+        expo=expo,
+        extra2d=disk_keep,
+    )
     fit_mask2d = fit_mask3d[k]
 
     # Diagnostics: masked fraction inside ROI&disk
@@ -1054,7 +1057,7 @@ def main():
             counts=counts,
             templates=base_mu,
             mask3d=fit_mask3d,
-            lon=lon_w,
+            lon=lon,
             lat=lat,
             roi_lon=float(args.roi_lon),
             roi_lat=float(args.roi_lat),
