@@ -14,14 +14,15 @@ import matplotlib.pyplot as plt  # noqa: E402
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from totani_helpers.totani_io import (  # noqa: E402
-    load_mask_any_shape,
     lonlat_grids,
+    load_mask_any_shape,
     pixel_solid_angle_map,
     read_counts_and_ebounds,
     read_exposure,
     resample_exposure_logE,
 )
 from totani_helpers.cellwise_fit import fit_cellwise_poisson_mle_counts  # noqa: E402
+from totani_helpers.fit_utils import build_fit_mask3d  # noqa: E402
 
 from fig2_3.make_totani_fig2_fig3_all import (  # noqa: E402
     assert_templates_match_counts,
@@ -128,15 +129,26 @@ def main():
         ext_keep3d = load_mask_any_shape(str(args.ext_mask), counts.shape)
         srcmask = srcmask & ext_keep3d
 
-    fit_mask3d = srcmask & (roi2d & hilat2d)[None, :, :]
+    fit_mask3d = build_fit_mask3d(
+        roi2d=roi2d,
+        srcmask3d=srcmask,
+        counts=counts,
+        expo=expo,
+        extra2d=hilat2d,
+    )
 
     pole2d = roi2d & (np.abs(lat) >= float(args.pole_cap_deg))
-    pole_mask3d = srcmask & pole2d[None, :, :]
+    pole_mask3d = build_fit_mask3d(
+        roi2d=pole2d,
+        srcmask3d=srcmask,
+        counts=counts,
+        expo=expo,
+    )
 
     variants = [
-        ("rho2.5", "nfw_rho2.5_g1.25_pheno"),
-        ("rho2", "nfw_rho2_g1.25_pheno"),
-        ("rho1", "nfw_rho1_g1.25_pheno"),
+        ("rho2.5", "nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno"),
+        ("rho2", "nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno"),
+        ("rho1", "nfw_NFW_g1_rho1_rs21_R08_rvir402_ns2048_normpole_pheno"),
     ]
 
     Ectr_gev = Ectr_mev / 1000.0
@@ -152,7 +164,7 @@ def main():
     axp.set_xscale("log")
 
     for tag, nfw_label in variants:
-        labels = ["gas", "iso", "ps", "loopI", "ics", nfw_label, "bubbles_pos", "bubbles_neg"]
+        labels = ["gas", "iso", "ps", "loopI", "ics", nfw_label, "fb_pos", "fb_neg"]
 
         mu_list, res_fit = _fit_and_load_templates(
             labels=labels,

@@ -9,14 +9,15 @@ from astropy.wcs import WCS
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from totani_helpers.totani_io import (  # noqa: E402
-    load_mask_any_shape,
     lonlat_grids,
+    load_mask_any_shape,
     pixel_solid_angle_map,
     read_counts_and_ebounds,
     read_exposure,
     resample_exposure_logE,
 )
 from totani_helpers.cellwise_fit import fit_cellwise_poisson_mle_counts  # noqa: E402
+from totani_helpers.fit_utils import build_fit_mask3d  # noqa: E402
 
 # Reuse plotting/spectrum utilities from fig2_3
 from fig2_3.make_totani_fig2_fig3_all import (  # noqa: E402
@@ -90,10 +91,16 @@ def main():
         srcmask = srcmask & ext_keep3d
 
     # Fit mask: ROI and disk removed
-    fit_mask3d = srcmask & (roi2d & hilat2d)[None, :, :]
+    fit_mask3d = build_fit_mask3d(
+        roi2d=roi2d,
+        srcmask3d=srcmask,
+        counts=counts,
+        expo=expo,
+        extra2d=hilat2d,
+    )
 
     # Components: no NFW, no flat bubbles; use bubbles_pos/neg
-    labels = ["gas", "iso", "ps", "loopI", "ics", "fbneg_E4.3GeV_k2_roiL60_roiB60_normnone_expocenter", "fbpos_E4.3GeV_k2_roiL60_roiB60_normnone_expocenter"]
+    labels = ["gas", "iso", "ps", "loopI", "ics", "fb_neg_norm", "fb_pos_norm"]
     mu_list, _hdrs = load_mu_templates_from_fits(
         template_dir=args.templates_dir,
         labels=labels,

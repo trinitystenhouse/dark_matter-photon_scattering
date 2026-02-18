@@ -9,13 +9,15 @@ from astropy.wcs import WCS
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from totani_helpers.totani_io import (  # noqa: E402
-    load_mask_any_shape,
     lonlat_grids,
+    load_mask_any_shape,
     pixel_solid_angle_map,
     read_counts_and_ebounds,
     read_exposure,
     resample_exposure_logE,
 )
+from totani_helpers.cellwise_fit import fit_cellwise_poisson_mle_counts
+from totani_helpers.fit_utils import build_fit_mask3d
 
 from make_fig import make_fig
 
@@ -82,7 +84,13 @@ def main():
         srcmask = srcmask & ext_keep3d
 
     # Fit mask: ROI and disk removed
-    fit_mask3d = srcmask & (roi2d & hilat2d)[None, :, :]
+    fit_mask3d = build_fit_mask3d(
+        roi2d=roi2d,
+        srcmask3d=srcmask,
+        counts=counts,
+        expo=expo,
+        extra2d=hilat2d,
+    )
 
     common = dict(
         templates_dir=args.templates_dir,
@@ -99,7 +107,7 @@ def main():
         cell_deg=float(args.cell_deg),
     )
 
-    labels_5 = ["gas", "iso", "ps", "loopI", "ics", "nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno", "bubbles_pos", "bubbles_neg"]
+    labels_5 = ["gas", "iso", "ps", "loopI", "ics", "nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno", "fb_pos", "fb_neg"]
     make_fig(
         labels=labels_5,
         out_png=os.path.join(args.outdir, "totani_fig5_fit_components.png"),
@@ -108,7 +116,7 @@ def main():
         **common,
     )
 
-    labels_6 = ["gas", "iso", "ps", "loopI", "ics", "nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno", "bubbles_pos", "bubbles_neg"]
+    labels_6 = ["gas", "iso", "ps", "loopI", "ics", "nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno", "fb_pos", "fb_neg"]
     make_fig(
         labels=labels_6,
         out_png=os.path.join(args.outdir, "totani_fig6_fit_components.png"),
@@ -117,7 +125,7 @@ def main():
         **common,
     )
 
-    labels_7 = ["gas", "iso", "ps", "loopI", "ics", "nfw_NFW_g1_rho1_rs21_R08_rvir402_ns2048_normpole_pheno", "bubbles_pos", "bubbles_neg"]
+    labels_7 = ["gas", "iso", "ps", "loopI", "ics", "nfw_NFW_g1_rho1_rs21_R08_rvir402_ns2048_normpole_pheno", "fb_pos", "fb_neg"]
     make_fig(
         labels=labels_7,
         out_png=os.path.join(args.outdir, "totani_fig7_fit_components.png"),

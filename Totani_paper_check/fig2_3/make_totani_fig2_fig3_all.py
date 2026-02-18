@@ -16,6 +16,7 @@ from totani_helpers.totani_io import (
     resample_exposure_logE,
 )
 from totani_helpers.cellwise_fit import fit_cellwise_poisson_mle_counts
+from totani_helpers.fit_utils import build_fit_mask3d
 
 REPO_DIR = os.environ["REPO_PATH"]
 DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
@@ -941,7 +942,12 @@ def main():
     fig3_region2d = roi2d & (np.abs(lat) >= disk_cut)  # Fig 3: exclude disk
 
     # Fit mask is the SAME for both figures: ROI including disk
-    fit_mask3d = srcmask & roi2d[None, :, :]
+    fit_mask3d = build_fit_mask3d(
+        roi2d=roi2d,
+        srcmask3d=srcmask,
+        counts=counts,
+        expo=expo,
+    )
 
     res_fit = fit_cellwise_poisson_mle_counts(
         counts=counts,
