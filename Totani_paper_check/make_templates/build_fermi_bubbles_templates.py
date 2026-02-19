@@ -27,8 +27,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from astropy.io import fits
 from astropy.wcs import WCS
+from matplotlib.path import Path
 from scipy.optimize import minimize
 from scipy.ndimage import binary_opening, binary_closing, binary_fill_holes
+import numpy as np
+from typing import Dict, Tuple, Union
+from scipy.optimize import nnls
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from totani_helpers.totani_io import (
@@ -37,7 +41,10 @@ from totani_helpers.totani_io import (
     read_counts_and_ebounds,
     read_exposure,
     resample_exposure_logE,
+    load_mask_any_shape,
+    write_cube,
 )
+from totani_helpers.fit_utils import *
 from totani_helpers.cellwise_fit import fit_cellwise_poisson_mle_counts
 import numpy as np
 from dataclasses import dataclass
@@ -51,15 +58,11 @@ from scipy.ndimage import gaussian_filter
 
 import matplotlib.pyplot as plt
 
-import numpy as np
-import matplotlib.pyplot as plt
-import numpy as np
-import matplotlib.pyplot as plt
-
 def _disk_structure(radius_pix):
     r = int(max(1, round(float(radius_pix))))
     y, x = np.ogrid[-r : r + 1, -r : r + 1]
     return (x * x + y * y) <= (r * r)
+
 def _cleanup_binary_mask(mask_2d, *, r_open_pix, r_close_pix):
     if not np.any(mask_2d):
         return mask_2d
@@ -69,6 +72,33 @@ def _cleanup_binary_mask(mask_2d, *, r_open_pix, r_close_pix):
     m = binary_closing(m, structure=st_close)
     m = binary_fill_holes(m)
     return m
+
+def _read_vertices_txt(path):
+    pts = []
+    with open(path, "r") as f:
+        for line in f:
+            s = line.strip()
+            if (not s) or s.startswith("#"):
+                continue
+            parts = s.split()
+            if len(parts) < 2:
+                continue
+            pts.append((float(parts[0]), float(parts[1])))
+    if len(pts) < 3:
+        raise RuntimeError(f"Vertex file {path} has <3 valid points")
+    return np.asarray(pts, dtype=float)
+
+def _poly_mask_lonlat(*, lon2d, lat2d, verts_lonlat):
+    lon2d = np.asarray(lon2d, dtype=float)
+    lat2d = np.asarray(lat2d, dtype=float)
+    verts_lonlat = np.asarray(verts_lonlat, dtype=float)
+    if verts_lonlat.ndim != 2 or verts_lonlat.shape[1] != 2:
+        raise ValueError("verts_lonlat must be (N,2) in (lon,lat)")
+
+    p = Path(verts_lonlat)
+    pts = np.column_stack([lon2d.ravel(), lat2d.ravel()])
+    inside = p.contains_points(pts)
+    return inside.reshape(lon2d.shape)
 
 def plot_residual_sign_diagnostics(
     *,
@@ -343,12 +373,6 @@ def plot_fb_shape_comparison(
         plt.savefig(outpath, dpi=200)
     plt.show()
 
-def write_cube(path, data, hdr_like, bunit=None):
-    hdu = fits.PrimaryHDU(data.astype("f4"), header=hdr_like)
-    if bunit is not None:
-        hdu.header["BUNIT"] = bunit
-    hdu.writeto(path, overwrite=True)
-
 def _get2(x, k=None):
     """
     Helper: if x is 3D (nE,ny,nx) return slice k, else return x as-is.
@@ -359,16 +383,6 @@ def _get2(x, k=None):
             raise ValueError("Need k for 3D array")
         return x[k]
     return x
-
-def _load_mask(path):
-    if (path is None) or (not os.path.exists(path)):
-        return np.ones((nE, ny, nx), dtype=bool)
-    m = fits.getdata(path).astype(bool)
-    if m.shape == (ny, nx):
-        return np.broadcast_to(m[None, :, :], (nE, ny, nx)).copy()
-    if m.shape == (nE, ny, nx):
-        return m
-    raise ValueError(f"Mask {os.path.basename(path)} has shape {m.shape}, expected {(ny,nx)} or {(nE,ny,nx)}")
 
 def plot_bubbles_diagnostics(out, *, Ectr_gev=None, k=None, roi2d=None, srcmask2d=None, title_prefix="", lat=None, lon=None):
     # Decide k
@@ -450,82 +464,6 @@ def plot_bubbles_diagnostics(out, *, Ectr_gev=None, k=None, roi2d=None, srcmask2
 
     plt.show()
 
-def load_mu_templates_from_fits(
-    template_dir,
-    labels,
-    filename_pattern="{label}.fits",   # or "{label}_template.fits"
-    hdu=0,
-    dtype=np.float32,
-    memmap=True,
-    require_same_shape=True,
-):
-    """
-    Load TRUE-counts template cubes (mu) from FITS files into mu_list.
-
-    Assumes each template FITS contains a data cube shaped like:
-        (nE, ny, nx)   OR   (nE, npix)
-    matching your counts cube.
-
-    Parameters
-    ----------
-    template_dir : str
-        Directory containing FITS templates.
-    labels : list[str]
-        Component labels, used to build filenames.
-    filename_pattern : str
-        How to build a filename from a label. Example:
-            "{label}.fits"
-            "mu_{label}.fits"
-            "{label}_mapcube.fits"
-    hdu : int
-        FITS HDU index holding the data.
-    dtype : numpy dtype
-        Cast output arrays to this dtype (float32 is usually plenty).
-    memmap : bool
-        Use FITS memmap to avoid loading everything at once.
-    require_same_shape : bool
-        If True, raises if templates don't all share the same shape.
-
-    Returns
-    -------
-    mu_list : list[np.ndarray]
-        List of template arrays in counts units.
-    headers : list[fits.Header]
-        Corresponding FITS headers (for WCS / energy metadata if needed).
-    """
-    mu_list = []
-    headers = []
-    shapes = []
-
-    for lab in labels:
-        path = os.path.join(template_dir, filename_pattern.format(label=lab))
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Template not found for '{lab}': {path}")
-
-        with fits.open(path, memmap=memmap) as hdul:
-            data = hdul[hdu].data
-            hdr = hdul[hdu].header
-
-        if data is None:
-            raise ValueError(f"No data in {path} (HDU {hdu})")
-
-        arr = np.asarray(data, dtype=dtype)
-
-        # Basic sanity: must be at least 2D with energy axis first
-        if arr.ndim < 2:
-            raise ValueError(f"Template '{lab}' has ndim={arr.ndim}, expected (nE, ...spatial...)")
-
-        mu_list.append(arr)
-        headers.append(hdr)
-        shapes.append(arr.shape)
-
-    if require_same_shape:
-        s0 = shapes[0]
-        for lab, s in zip(labels, shapes):
-            if s != s0:
-                raise ValueError(f"Shape mismatch: '{labels[0]}' {s0} vs '{lab}' {s}")
-
-    return mu_list, headers
 
 # ----------------------------
 # Utilities
@@ -547,103 +485,6 @@ def solid_angle_per_pixel(ny: int, nx: int, lon_deg: np.ndarray, lat_deg: np.nda
 
 def gaussian_sigma_pix(sigma_deg: float, pixsize_deg: float) -> float:
     return float(sigma_deg / pixsize_deg)
-
-
-import numpy as np
-from typing import Dict, Tuple, Union
-from scipy.optimize import nnls
-
-def fit_nnls_counts_3d(
-    data_counts: np.ndarray,                      # (nE,ny,nx)
-    templates_counts: Dict[str, np.ndarray],      # each (nE,ny,nx) OR (ny,nx)
-    fit_mask_2d: np.ndarray,                      # (ny,nx) bool
-    *,
-    mode: str = "per_energy",                     # "per_energy" or "global"
-    min_pix: int = 10,
-) -> Tuple[Dict[str, Union[np.ndarray, float]], np.ndarray]:
-    """
-    NNLS fit in counts space for 3D data cubes.
-
-    model(E,x) ≈ Σ_i a_i(E) * T_i(E,x)    (mode="per_energy")
-    or
-    model(E,x) ≈ Σ_i a_i     * T_i(E,x)   (mode="global")
-
-    Templates can be provided as:
-      - (nE,ny,nx): energy-dependent counts templates
-      - (ny,nx): broadcast to all energies (useful for purely spatial masks only IF already in counts;
-                 in most cases you should convert spatial templates to counts per energy first)
-    """
-    data_counts = np.asarray(data_counts)
-    if data_counts.ndim != 3:
-        raise ValueError(f"data_counts must be (nE,ny,nx); got {data_counts.shape}")
-    nE, ny, nx = data_counts.shape
-
-    fit_mask_2d = np.asarray(fit_mask_2d, dtype=bool)
-    if fit_mask_2d.shape != (ny, nx):
-        raise ValueError(f"fit_mask_2d must be (ny,nx)={ny,nx}; got {fit_mask_2d.shape}")
-
-    # Prepare template stack (nComp, nE, ny, nx)
-    names = list(templates_counts.keys())
-    Ts = []
-    for name in names:
-        T = np.asarray(templates_counts[name], dtype=float)
-        if T.ndim == 2:
-            if T.shape != (ny, nx):
-                raise ValueError(f"Template '{name}' 2D shape must be (ny,nx); got {T.shape}")
-            T = np.broadcast_to(T[None, :, :], (nE, ny, nx)).copy()
-        elif T.ndim == 3:
-            if T.shape != (nE, ny, nx):
-                raise ValueError(f"Template '{name}' 3D shape must be (nE,ny,nx); got {T.shape}")
-        else:
-            raise ValueError(f"Template '{name}' must be 2D or 3D; got {T.shape}")
-        Ts.append(T)
-    Tstack = np.stack(Ts, axis=0)  # (nComp,nE,ny,nx)
-
-    # Mask: broadcast over energy, and require finite data
-    m3 = fit_mask_2d[None, :, :] & np.isfinite(data_counts)
-
-    if mode == "per_energy":
-        coeffs = np.zeros((nE, len(names)), dtype=float)
-        model = np.zeros_like(data_counts, dtype=float)
-
-        for k in range(nE):
-            mk = m3[k]
-            if mk.sum() < min_pix:
-                # leave coeffs[k] = 0 and model[k]=0; or raise if you prefer
-                continue
-
-            y = data_counts[k][mk].astype(float)  # (Npix,)
-            A = np.vstack([Tstack[j, k][mk] for j in range(len(names))]).T  # (Npix, nComp)
-
-            c, _ = nnls(A, y)
-            coeffs[k, :] = c
-
-            # build model plane
-            for j, name in enumerate(names):
-                model[k] += c[j] * Tstack[j, k]
-
-        coeff_dict = {name: coeffs[:, j].copy() for j, name in enumerate(names)}
-        return coeff_dict, model
-
-    elif mode == "global":
-        mflat = m3.reshape(-1)
-        if mflat.sum() < min_pix:
-            raise RuntimeError("fit mask too small")
-
-        y = data_counts.reshape(-1)[mflat].astype(float)  # (Npts,)
-        A = np.vstack([Tstack[j].reshape(-1)[mflat] for j in range(len(names))]).T  # (Npts,nComp)
-
-        c, _ = nnls(A, y)
-
-        model = np.zeros_like(data_counts, dtype=float)
-        for j, name in enumerate(names):
-            model += c[j] * Tstack[j]
-
-        coeff_dict = {name: float(c[j]) for j, name in enumerate(names)}
-        return coeff_dict, model
-
-    else:
-        raise ValueError("mode must be 'per_energy' or 'global'")
 
 def counts_to_flux(
     counts: np.ndarray,                 # (ny,nx) or (nE,ny,nx)
@@ -798,9 +639,6 @@ def make_flat_bubbles_mask(
     return mask
 
 
-import numpy as np
-from typing import Union
-
 def flat_template_counts_from_mask(
     flat_mask_2d: np.ndarray,     # (ny,nx) bool/0-1
     expo: np.ndarray,             # (ny,nx) or (nE,ny,nx)
@@ -854,38 +692,6 @@ def flat_template_counts_from_mask(
 
 import numpy as np
 
-def normalise_templates_counts(templates_counts, fit_mask_2d):
-    """
-    templates_counts: dict name -> (nE,ny,nx) counts template
-    fit_mask_2d: (ny,nx) boolean mask used for the fit
-
-    Returns:
-      templates_norm: dict name -> (nE,ny,nx) counts template, where for each k:
-                       sum_k(template[k][fit_mask]) = 1 (if original sum > 0)
-      norms: dict name -> (nE,) original sums in the fit mask
-    """
-    templates_norm = {}
-    norms = {}
-
-    for name, T in templates_counts.items():
-        T = np.asarray(T, dtype=float)
-        if T.ndim != 3:
-            raise ValueError(f"{name} must be 3D (nE,ny,nx), got shape {T.shape}")
-
-        nE = T.shape[0]
-        Tn = T.copy()
-        s = np.zeros(nE, dtype=float)
-
-        for k in range(nE):
-            sk = float(np.nansum(Tn[k][fit_mask_2d]))
-            s[k] = sk
-            if sk > 0:
-                Tn[k] /= sk
-
-        templates_norm[name] = Tn
-        norms[name] = s
-
-    return templates_norm, norms
 
 # ----------------------------
 # Main Totani-style builder
@@ -979,8 +785,8 @@ def build_bubbles_templates(
     f2[~use] = np.nan
 
     # pick top tail on each side independently
-    pos_thr = 0# np.nanpercentile(f2[(f2 > 0) & np.isfinite(f2)], 80)   # tune 90–99
-    neg_thr = 0# np.nanpercentile(f2[(f2 < 0) & np.isfinite(f2)], 50)    # bottom 5% (more negative)
+    pos_thr = np.nanpercentile(f2[(f2 > 0) & np.isfinite(f2)], 95)   # tune 90–99
+    neg_thr =np.nanpercentile(f2[(f2 < 0) & np.isfinite(f2)], 5)    # bottom 5% (more negative)
 
     pos = (f2 > pos_thr).astype(float)
     neg = (f2 < neg_thr).astype(float)
@@ -1060,7 +866,7 @@ if __name__ == "__main__":
     lon, lat = lonlat_grids(wcs, ny, nx)
 
     roi_mask_2d = (np.abs(lon) <= 60) & (np.abs(lat) <= 60)
-    ext_mask3d = _load_mask(args.ext_mask)
+    ext_mask3d = load_mask_any_shape(args.ext_mask, counts_cov.shape)
     ext_mask2d = np.any(ext_mask3d, axis=0)   # (ny,nx) True if masked in any E
 
     # Other templates (counts space!) at this energy:
@@ -1077,6 +883,26 @@ if __name__ == "__main__":
     other_templates_counts = {}
     for i in range(len(mu_list)):
         other_templates_counts[labels[i]] = mu_list[i]
+
+    if not os.path.exists(str(args.bubble_mask)):
+        verts_n_path = os.path.join(os.path.dirname(__file__), "bubble_vertices_north.txt")
+        verts_s_path = os.path.join(os.path.dirname(__file__), "bubble_vertices_south.txt")
+        if (not os.path.exists(verts_n_path)) or (not os.path.exists(verts_s_path)):
+            raise FileNotFoundError(
+                f"Bubble mask not found: {args.bubble_mask}\n"
+                f"Also missing vertex files: {verts_n_path} and/or {verts_s_path}"
+            )
+
+        verts_n = _read_vertices_txt(verts_n_path)
+        verts_s = _read_vertices_txt(verts_s_path)
+        mask_n = _poly_mask_lonlat(lon2d=lon, lat2d=lat, verts_lonlat=verts_n)
+        mask_s = _poly_mask_lonlat(lon2d=lon, lat2d=lat, verts_lonlat=verts_s)
+        fb_mask_2d_tmp = (mask_n | mask_s)
+        fb_mask_2d_tmp = _cleanup_binary_mask(fb_mask_2d_tmp, r_open_pix=1, r_close_pix=2)
+
+        os.makedirs(os.path.dirname(str(args.bubble_mask)), exist_ok=True)
+        fits.PrimaryHDU(fb_mask_2d_tmp.astype(np.int16), header=hdr).writeto(str(args.bubble_mask), overwrite=True)
+        print(f"✓ wrote fallback bubble mask: {args.bubble_mask}")
 
     fb_mask_2d = fits.getdata(args.bubble_mask).astype(bool)
     if fb_mask_2d.ndim == 3:
@@ -1129,15 +955,34 @@ if __name__ == "__main__":
     for n, s in norms_all.items():
         print(f"  {n:10s} sum={s[k_construct]:.3e}")
 
-    coeff_norm, model_norm = fit_nnls_counts_3d(
-        data_counts=counts_cov,
-        templates_counts=templates_all_norm,
-        fit_mask_2d=fit_mask,
-        mode="per_energy",
+    fit_mask3d = build_fit_mask3d(
+        roi2d=roi_mask_2d,
+        srcmask3d=ext_mask3d,
+        counts=counts_cov,
+        expo=expo_safe,
+        extra2d=None,
     )
-    resid_counts = counts_cov - model_norm
-    c_flat_phys = np.asarray(coeff_norm["fb_flat"], float) / norms_all["fb_flat"]
-    bubble_flat_counts = c_flat_phys[:, None, None] * mu_flat
+    res_fit = fit_cellwise_poisson_mle_counts(
+        counts=counts_cov,
+        templates=templates_all,
+        mask3d=fit_mask3d,
+        lon=lon,
+        lat=lat,
+        roi_lon=float(args.roi_lon),
+        roi_lat=float(args.roi_lat),
+        cell_deg=float(CELL_DEG),
+        nonneg=True,
+        column_scale="l2",
+        drop_tol=0.0,
+        ridge=0.0,
+    )
+    comp_counts, model_counts = component_counts_from_cellwise_fit(
+        templates_counts=templates_all,
+        res_fit=res_fit,
+        mask3d=fit_mask3d,
+    )
+    resid_counts = counts_cov - model_counts
+    bubble_flat_counts = np.asarray(comp_counts["fb_flat"], float)
     bubble_image_counts = bubble_flat_counts + resid_counts
 
     # --- convert bubble_image_counts -> flux and smooth (spatial only) ---
