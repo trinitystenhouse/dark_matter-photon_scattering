@@ -56,23 +56,12 @@ def read_2d_fits(path):
 def main():
     ap = argparse.ArgumentParser()
 
-    repo_dir = os.environ.get("REPO_PATH", os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-    data_dir = os.path.join(repo_dir, "fermi_data", "totani")
-    default_counts = os.path.join(data_dir, "processed", "counts_ccube_1000to1000000.fits")
-    default_expo = os.path.join(data_dir, "processed", "expcube_1000to1000000.fits")
-    default_outdir = os.path.join(data_dir, "processed", "templates")
-    default_model_mu = os.path.join(repo_dir, "Totani_paper_check", "fig1", "plots_fig1", "mu_modelsum_counts.fits")
-
-    ap.add_argument("--counts", default=default_counts, help="Counts CCUBE (authoritative WCS + EBOUNDS)")
-    ap.add_argument("--expo", default=default_expo, help="Exposure cube (expcube)")
-    ap.add_argument("--outdir", default=default_outdir)
+    ap.add_argument("--counts", required=True, help="Counts CCUBE (authoritative WCS + EBOUNDS)")
+    ap.add_argument("--expo", required=True, help="Exposure cube (expcube)")
+    ap.add_argument("--outdir", required=True)
 
     # Provide exactly one of these:
-    ap.add_argument(
-        "--model-mu",
-        default=default_model_mu,
-        help="Best-fit model expected counts cube (3D, same shape as counts)",
-    )
+    ap.add_argument("--model-mu", default=None, help="Best-fit model expected counts cube (3D, same shape as counts)")
     ap.add_argument("--residual-map", default=None, help="2D residual map at target energy on CCUBE grid (counts units)")
 
     ap.add_argument("--binsz", type=float, default=0.125)

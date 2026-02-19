@@ -5,6 +5,11 @@ from astropy.wcs import WCS
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 import os
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from totani_helpers.totani_io import read_counts_and_ebounds
 
 REPO_DIR = os.environ["REPO_PATH"]
 DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
@@ -80,13 +85,9 @@ def combine_radii(r_ext, r_psf):
 # ------------------
 # Load counts cube geometry
 # ------------------
-with fits.open(COUNTS) as h:
-    counts = h[0].data
-    hdr    = h[0].header
-    eb     = h["EBOUNDS"].data
-
+counts, hdr, _Emin_mev, _Emax_mev, Ectr_mev, _dE_mev = read_counts_and_ebounds(COUNTS)
 nE, ny, nx = counts.shape
-Ectr_GeV = np.sqrt(eb["E_MIN"] * eb["E_MAX"]) / 1000.0
+Ectr_GeV = np.asarray(Ectr_mev, dtype=float) / 1000.0
 print("Energy bin centers (GeV):", np.round(Ectr_GeV, 3))
 
 # Pixel coords

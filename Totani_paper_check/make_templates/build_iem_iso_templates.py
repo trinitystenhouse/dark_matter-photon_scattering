@@ -16,24 +16,20 @@ import sys
 import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
-from scipy.interpolate import RegularGridInterpolator
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from totani_helpers.totani_io import pixel_solid_angle_map, read_exposure, resample_exposure_logE
+from totani_helpers.totani_io import (
+    pixel_solid_angle_map,
+    read_counts_and_ebounds,
+    read_exposure,
+    reproject_cube_to_target,
+    resample_exposure_logE,
+    write_cube,
+)
 
 DEG2RAD = np.pi / 180.0
 REPO_DIR = os.environ["REPO_PATH"]
 DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
-
-# ---------- helpers ----------
-def read_counts_bins(counts_ccube_path):
-    with fits.open(counts_ccube_path) as h:
-        hdr = h[0].header
-        eb  = h["EBOUNDS"].data
-        emin = np.array(eb["E_MIN"], float)  # keV (for this dataset)
-        emax = np.array(eb["E_MAX"], float)  # keV (for this dataset)
-    ectr = np.sqrt(emin * emax)              # MeV
-    return hdr, emin, emax, ectr
 
 def interp_energy_planes(cube, E_src, E_tgt):
     """Interpolate (NE,ny,nx) cube from E_src->E_tgt in log(E). Energies in MeV."""
@@ -72,32 +68,6 @@ def read_iem(iem_path):
             raise RuntimeError("IEM has no ENERGIES/EBOUNDS extension.")
     return cube, w, E, hdr
 
-def reproject_plane_to_target(src_plane, w_src, w_tgt, ny_tgt, nx_tgt):
-    yy, xx = np.mgrid[0:ny_tgt, 0:nx_tgt]
-    lon, lat = w_tgt.pixel_to_world_values(xx, yy)
-    xs, ys = w_src.world_to_pixel_values(lon, lat)
-
-    ny, nx = src_plane.shape
-    y = np.arange(ny, dtype=float)
-    x = np.arange(nx, dtype=float)
-
-    interp = RegularGridInterpolator(
-        (y, x),
-        src_plane,
-        method="linear",
-        bounds_error=False,
-        fill_value=np.nan,
-    )
-    pts = np.vstack([ys.ravel(), xs.ravel()]).T
-    return interp(pts).reshape(ny_tgt, nx_tgt)
-
-
-def reproject_cube_to_target(src_cube, w_src, w_tgt, ny_tgt, nx_tgt):
-    out = np.empty((src_cube.shape[0], ny_tgt, nx_tgt), float)
-    for k in range(src_cube.shape[0]):
-        out[k] = reproject_plane_to_target(src_cube[k], w_src, w_tgt, ny_tgt, nx_tgt)
-    return out
-
 def read_isotropic_txt(path):
     """
     Reads iso_* txt files: typically columns are E(MeV), ..., I (ph cm^-2 s^-1 sr^-1 MeV^-1)
@@ -121,12 +91,6 @@ def read_isotropic_txt(path):
     I = np.array(I, float)
     o = np.argsort(E)
     return E[o], I[o]
-
-def write_cube(path, data, hdr_like, bunit=None):
-    hdu = fits.PrimaryHDU(data.astype("f4"), header=hdr_like)
-    if bunit is not None:
-        hdu.header["BUNIT"] = bunit
-    hdu.writeto(path, overwrite=True)
 
 # ---------- main ----------
 def main():
@@ -169,29 +133,15 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
 
     # Target grid + energies from counts cube
-    hdr_cnt, Emin_raw, Emax_raw, Ectr_raw = read_counts_bins(args.counts)
-
-    # Auto-detect keV vs MeV in counts EBOUNDS
-    # keV typically ~1e6 for 1 GeV; MeV typically ~1e3 for 1 GeV
-    if float(np.nanmedian(Emax_raw)) > 1e6:
-        unit_counts = "keV"
-        Emin = Emin_raw / 1000.0
-        Emax = Emax_raw / 1000.0
-        Ectr = Ectr_raw / 1000.0
-    else:
-        unit_counts = "MeV"
-        Emin = Emin_raw
-        Emax = Emax_raw
-        Ectr = Ectr_raw
-
-    nE = len(Ectr)
+    _, hdr_cnt, Emin, Emax, Ectr, _dE_unused = read_counts_and_ebounds(args.counts)
+    nE = int(Ectr.size)
 
     w_tgt = WCS(hdr_cnt).celestial
     ny, nx = hdr_cnt["NAXIS2"], hdr_cnt["NAXIS1"]
 
     dE = (Emax - Emin)  # MeV
 
-    print(f"[E] counts EBOUNDS assumed in {unit_counts} -> using MeV internally")
+    print("[E] counts EBOUNDS -> using MeV internally")
     print("[E]   Ectr_MeV:", np.round(Ectr, 6))
     print("[E]   Ectr_GeV:", np.round(Ectr / 1000.0, 6))
     print("[E]   dE_MeV  :", np.round(dE, 6))
@@ -216,7 +166,7 @@ def main():
         raise RuntimeError("IEM cube energy axis length mismatch.")
 
     iem_E = interp_energy_planes(iem_cube, E_iem, Ectr) if iem_cube.shape[0] != nE else iem_cube
-    iem_on_grid = reproject_cube_to_target(iem_E, w_src, w_tgt, ny, nx)
+    iem_on_grid = reproject_cube_to_target(src_cube=iem_E, w_src=w_src, w_tgt=w_tgt, ny_tgt=ny, nx_tgt=nx, wrap_lon=True)
 
     # Ensure IEM is in per-MeV units. If not, convert.
     # If BUNIT says it's per sr per cm2 per s but NOT per MeV, treat as per-energy-bin and divide by dE.

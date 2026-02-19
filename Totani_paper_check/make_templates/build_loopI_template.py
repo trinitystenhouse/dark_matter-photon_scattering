@@ -27,8 +27,9 @@ from astropy.wcs import WCS
 
 from totani_helpers.totani_io import (
     pixel_solid_angle_map,
-    read_expcube_energies_mev,
-    resample_exposure_logE_interp,
+    read_counts_and_ebounds,
+    read_exposure,
+    resample_exposure_logE,
 )
 
 REPO_DIR = os.environ["REPO_PATH"]
@@ -111,51 +112,16 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
 
     # --- Load counts grid + energies ---
-    with fits.open(args.counts) as h:
-        hdr = h[0].header
-        eb = h["EBOUNDS"].data
-
+    _counts, hdr, Emin_mev, Emax_mev, Ectr_mev, dE_mev = read_counts_and_ebounds(args.counts)
+    nE = int(Ectr_mev.size)
     wcs = WCS(hdr).celestial
     ny, nx = int(hdr["NAXIS2"]), int(hdr["NAXIS1"])
 
-    Emin_kev = eb["E_MIN"].astype(float)
-    Emax_kev = eb["E_MAX"].astype(float)
-    Ectr_kev = np.sqrt(Emin_kev * Emax_kev)
-
-    Emin_mev = Emin_kev / 1000.0
-    Emax_mev = Emax_kev / 1000.0
-    dE_mev = (Emax_mev - Emin_mev)
-    Ectr_mev = np.sqrt(Emin_mev * Emax_mev)
-
-    nE = len(Ectr_mev)
-
-    print("[E] counts EBOUNDS:")
-    print("[E]   Emin_keV:", np.round(Emin_kev, 3))
-    print("[E]   Emax_keV:", np.round(Emax_kev, 3))
-    print("[E]   Ectr_keV:", np.round(Ectr_kev, 3))
-    print("[E]   Emin_MeV:", np.round(Emin_mev, 6))
-    print("[E]   Emax_MeV:", np.round(Emax_mev, 6))
-    print("[E]   Ectr_MeV:", np.round(Ectr_mev, 6))
-    print("[E]   Ectr_GeV:", np.round(Ectr_mev / 1000.0, 6))
-    print("[E]   dE_MeV  :", np.round(dE_mev, 6))
-
     # --- exposure (cm^2 s), resample if needed ---
-    with fits.open(args.expcube) as h:
-        expo_raw = np.array(h[0].data, dtype=np.float64)
-        E_expo_mev = read_expcube_energies_mev(h)
-        print("[E] expcube ENERGIES (MeV, canonical reader):")
-        print("[E]   N:", int(E_expo_mev.size))
-        print("[E]   min/max:", float(np.nanmin(E_expo_mev)), float(np.nanmax(E_expo_mev)))
-        print("[E]   first/last:", float(E_expo_mev[0]), float(E_expo_mev[-1]))
-
-    print("[E] expcube planes (raw):", expo_raw.shape)
-
-    expo = resample_exposure_logE_interp(expo_raw, E_expo_mev, Ectr_mev)
+    expo_raw, E_expo_mev = read_exposure(args.expcube)
+    expo = resample_exposure_logE(expo_raw, E_expo_mev, Ectr_mev)
     if expo.shape != (nE, ny, nx):
         raise RuntimeError(f"Exposure shape {expo.shape} not compatible with {(nE, ny, nx)}")
-
-    print("[E] expcube planes (resampled):", expo.shape)
-    print("[DBG] expo used per-bin sum:", np.nansum(expo, axis=(1,2)))
 
     # --- lon/lat, omega ---
     yy, xx = np.mgrid[:ny, :nx]
@@ -193,9 +159,6 @@ def main():
     if not np.isfinite(s) or s <= 0:
         raise RuntimeError("Loop I template is zero in ROI; check shell parameters")
 
-    # Normalize spatial template to peak = 1 for physical scaling
-    T_normalized = T / np.nanmax(T)
-    
     # --- Physical Loop I gamma-ray emission model ---
     # Loop I is a radio shell with known surface brightness
     # Gamma-rays come from inverse Compton scattering of electrons on ISRF/CMB
@@ -211,23 +174,24 @@ def main():
     # I_gamma ~ 10^-7 to 10^-6 ph cm^-2 s^-1 sr^-1 MeV^-1 at 1 GeV
     # with spectrum roughly E^-2.5 to E^-3
     
-    # Peak surface brightness at 1 GeV reference energy
-    I_peak_1GeV = 5e-7  # ph cm^-2 s^-1 sr^-1 MeV^-1 (typical for Loop I)
-    E_ref_GeV = 1.0
-    spectral_index = -2.7  # E^-2.7 spectrum (typical for IC)
-    
-    # Energy-dependent surface brightness
-    Ectr_gev = Ectr_mev / 1000.0
-    I_loopI_spectrum = I_peak_1GeV * (Ectr_gev / E_ref_GeV) ** spectral_index  # [ph cm^-2 s^-1 sr^-1 MeV^-1]
-    
-    # Build intensity cube: spatial template * spectrum
-    loopI_dnde = np.empty((nE, ny, nx), float)
-    for k in range(nE):
-        loopI_dnde[k] = T_normalized * I_loopI_spectrum[k]
+    # --- Normalise morphology for numerical stability (NOT physical scaling) ---
+    fit2d = roi2d  # or roi2d & data_ok2d & ext_mask2d if you have those here
+    vals = T[fit2d]
+    vals = vals[np.isfinite(vals) & (vals > 0)]
+    if vals.size == 0:
+        raise RuntimeError("Loop I template has no positive pixels in fit mask")
 
+    T_norm = T / np.mean(vals)   # mean=1 in fit region (recommended)
+
+    # --- PHENO (Totani-style): energy-independent morphology replicated ---
+    loopI_dnde = np.broadcast_to(T_norm[None, :, :], (nE, ny, nx)).astype(float).copy()
+
+    # Convert shape -> counts template
+    mu_loopI = loopI_dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
+
+    # Optional diagnostic products (shape only)
     loopI_E2dnde = loopI_dnde * (Ectr_mev[:, None, None] ** 2)
 
-    mu_loopI = loopI_dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
 
     # --- write ---
     out_dnde = os.path.join(args.outdir, "loopI_dnde.fits")
@@ -241,8 +205,6 @@ def main():
         "ph cm-2 s-1 sr-1 MeV-1",
         [
             "Loop I template: Physical IC emission model",
-            f"Peak intensity at 1 GeV: {I_peak_1GeV:.2e} ph cm^-2 s^-1 sr^-1 MeV^-1",
-            f"Spectral index: E^{spectral_index}",
             f"Shell 1: center=({args.shell1_l},{args.shell1_b}), R_in={args.shell1_rin_pc}, R_out={args.shell1_rout_pc} pc",
             f"Shell 2: center=({args.shell2_l},{args.shell2_b}), R_in={args.shell2_rin_pc}, R_out={args.shell2_rout_pc} pc",
         ],

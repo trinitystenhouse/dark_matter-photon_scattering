@@ -322,9 +322,9 @@ def main():
     data_dir = os.path.join(repo_dir, "fermi_data", "totani") if repo_dir else None
     default_counts = os.path.join(data_dir, "processed", "counts_ccube_1000to1000000.fits") if data_dir else None
     default_expo = os.path.join(data_dir, "processed", "expcube_1000to1000000.fits") if data_dir else None
-    default_dnde = os.path.join(data_dir, "processed", "templates", "nfw_rho2.5_g1.25_pheno_dnde.fits") if data_dir else None
-    default_e2 = os.path.join(data_dir, "processed", "templates", "nfw_rho2.5_g1.25_pheno_E2dnde.fits") if data_dir else None
-    default_mu = os.path.join(data_dir, "processed", "templates", "mu_nfw_rho2.5_g1.25_pheno_counts.fits") if data_dir else None
+    default_dnde = os.path.join(data_dir, "processed", "templates", "nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno_dnde.fits") if data_dir else None
+    default_e2 = os.path.join(data_dir, "processed", "templates", "nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno_E2dnde.fits") if data_dir else None
+    default_mu = os.path.join(data_dir, "processed", "templates", "mu_nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno_counts.fits") if data_dir else None
     default_coeffs = os.path.join(repo_dir, "Totani_paper_check", "fig2_3", "fit_coefficients_fig2_highlat.txt")
     ap = argparse.ArgumentParser()
     ap.add_argument("--dnde", default=default_dnde, help="nfw*_dnde.fits")

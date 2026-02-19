@@ -3,9 +3,6 @@ fermi_data
 papers
 test_plots
 Totani_paper_check/sanity_plots
-Totani_paper_check/fig1/plots_fig1
-Totani_paper_check/fig2_3/plots_fig2_3
-Totani_paper_check/fig9/plots_fig9
 Totani_paper_check/totani_paper_check.egg-info
 York_paper_check/fig2_3_4/plots_fig2_3_4
 York_paper_check/fig6/plots_fig6
@@ -16,4 +13,4 @@ __pycache__
 .DS_Store
 Totani_paper_check/make_templates/debug_plots
 Totani_paper_check/check_templates/plots_check_*
-Totani_paper_check/fig11/plots_fig11
+Totani_paper_check/fig*/plots_fig*

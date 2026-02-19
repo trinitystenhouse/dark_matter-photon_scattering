@@ -72,9 +72,7 @@ def main():
 
     # Prefer the new binary-flat product, then fall back to older ones.
     candidates = [
-        os.path.join(templates_dir, "mu_bubbles_flat_binary_counts.fits"),
-        os.path.join(templates_dir, "mu_bubbles_vertices_sca_full_counts.fits"),
-        os.path.join(templates_dir, "mu_bubbles_flat_counts.fits"),
+        os.path.join(templates_dir, "mu_fb_flat_counts.fits"),
     ]
     template = None
     for p in candidates:
@@ -111,10 +109,7 @@ def main():
 
     # Fall back to legacy mask naming based on template flavour
     if mask_path is None:
-        if os.path.basename(template).startswith("mu_bubbles_vertices_sca"):
-            mask_path = os.path.join(templates_dir, "bubbles_vertices_sca_full_mask.fits")
-        else:
-            mask_path = os.path.join(templates_dir, "bubbles_vertices_flat_full_mask.fits")
+        mask_path = os.path.join(templates_dir, "bubbles_flat_binary_mask.fits")
 
     if not os.path.exists(mask_path):
         raise SystemExit(f"Bubbles mask file not found: {mask_path}")

@@ -19,7 +19,13 @@ import astropy.units as u
 from scipy.ndimage import gaussian_filter
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from totani_helpers.totani_io import pixel_solid_angle_map, resample_exposure_logE
+from totani_helpers.totani_io import (
+    pixel_solid_angle_map,
+    read_counts_and_ebounds,
+    read_exposure,
+    resample_exposure_logE,
+    write_cube,
+)
 
 
 # --------------------------------------------------
@@ -63,28 +69,11 @@ def _to_str(x):
 # --------------------------------------------------
 # LOAD COUNTS HEADER / ENERGY BINS
 # --------------------------------------------------
-with fits.open(COUNTS) as h:
-    hdr = h[0].header
-    eb  = h["EBOUNDS"].data
-
+_, hdr, Emin_mev, Emax_mev, Ectr_mev, dE_mev = read_counts_and_ebounds(COUNTS)
 wcs = WCS(hdr).celestial
 ny, nx = int(hdr["NAXIS2"]), int(hdr["NAXIS1"])
-
-Emin_kev = eb["E_MIN"].astype(float)
-Emax_kev = eb["E_MAX"].astype(float)
-Ectr_kev = np.sqrt(Emin_kev * Emax_kev)
-
-# Correct MeV->GeV conversion (IMPORTANT)
-Emin_mev = Emin_kev / 1000.0
-Emax_mev = Emax_kev / 1000.0
-Ectr_mev = Ectr_kev / 1000.0
-dE_mev   = (Emax_mev - Emin_mev)
-
-nE = len(Ectr_mev)
+nE = int(Ectr_mev.size)
 print("[E] counts EBOUNDS:")
-print("[E]   Emin_keV:", np.round(Emin_kev, 3))
-print("[E]   Emax_keV:", np.round(Emax_kev, 3))
-print("[E]   Ectr_keV:", np.round(Ectr_kev, 3))
 print("[E]   Emin_MeV:", np.round(Emin_mev, 6))
 print("[E]   Emax_MeV:", np.round(Emax_mev, 6))
 print("[E]   Ectr_MeV:", np.round(Ectr_mev, 6))
@@ -98,19 +87,7 @@ omega = pixel_solid_angle_map(wcs, ny, nx, BINSZ_DEG)
 # --------------------------------------------------
 # LOAD EXPOSURE (cm^2 s), resample if needed
 # --------------------------------------------------
-with fits.open(EXPO) as h:
-    expo_raw = h[0].data.astype(float)
-    E_expo_mev = None
-    if "ENERGIES" in h:
-        col0 = h["ENERGIES"].columns.names[0]
-        E_expo_mev = np.array(h["ENERGIES"].data[col0], dtype=float)
-        print("[E] expcube ENERGIES (as stored, assumed MeV):")
-        print("[E]   N:", int(E_expo_mev.size))
-        print("[E]   min/max:", float(np.nanmin(E_expo_mev)), float(np.nanmax(E_expo_mev)))
-        print("[E]   first/last:", float(E_expo_mev[0]), float(E_expo_mev[-1]))
-    else:
-        print("[E] expcube has no ENERGIES extension")
-
+expo_raw, E_expo_mev = read_exposure(EXPO)
 print("[E] expcube planes (raw):", expo_raw.shape)
 
 expo = resample_exposure_logE(expo_raw, E_expo_mev, Ectr_mev)
@@ -213,41 +190,11 @@ E2dnde = dnde * (Ectr_mev[:, None, None] ** 2)
 
 
 # --------------------------------------------------
-# WRITE OUTPUTS (ASCII-safe FITS headers)
+# WRITE OUTPUTS
 # --------------------------------------------------
-def write_primary_with_bunit(path, data, hdr, bunit, comments):
-    hdu = fits.PrimaryHDU(data.astype(np.float32), header=hdr)
-    hdu.header["BUNIT"] = bunit
-    # Add COMMENT cards safely (ASCII only)
-    for c in comments:
-        c_ascii = c.encode("ascii", "replace").decode("ascii")
-        hdu.header.add_comment(c_ascii)
-    hdu.writeto(path, overwrite=True)
-
-write_primary_with_bunit(
-    OUT_MU, mu_ps, hdr, "counts",
-    comments=[
-        "Point-source template: expected counts per bin per pixel",
-        "Built from Flux1000 (1-100 GeV) + power-law approx; PSF-smoothed; uses exposure",
-    ],
-)
-
-write_primary_with_bunit(
-    OUT_DNDE, dnde, hdr, "ph cm-2 s-1 sr-1 MeV-1",
-    comments=[
-        "Point-source template: dN/dE intensity normalized by bin width (per MeV)",
-        "Built from Flux1000 (1-100 GeV) + power-law approx; PSF-smoothed",
-        "Definition: dN/dE = Phi_bin / (Omega_pix * dE_mev)",
-    ],
-)
-
-write_primary_with_bunit(
-    OUT_E2, E2dnde, hdr, "MeV cm-2 s-1 sr-1",
-    comments=[
-        "Point-source template: E^2 dN/dE (MeV) derived from dN/dE per MeV",
-        "Includes division by bin width dE (MeV)",
-    ],
-)
+write_cube(OUT_MU, mu_ps, hdr, bunit="counts")
+write_cube(OUT_DNDE, dnde, hdr, bunit="ph cm-2 s-1 sr-1 MeV-1")
+write_cube(OUT_E2, E2dnde, hdr, bunit="MeV cm-2 s-1 sr-1")
 
 print("✓ Wrote:", OUT_MU)
 print("✓ Wrote:", OUT_DNDE)
