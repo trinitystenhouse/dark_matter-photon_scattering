@@ -182,3 +182,18 @@ def load_mask_any_shape(mask_path, counts_shape):
     if m.shape == (ny, nx):
         return np.broadcast_to(m[None, :, :], (nE, ny, nx)).copy()
     raise RuntimeError(f"Mask shape {m.shape} not compatible with counts shape {(nE, ny, nx)}")
+
+def write_cube(path, data, hdr_like, bunit=None):
+    hdu = fits.PrimaryHDU(data.astype("f4"), header=hdr_like)
+    if bunit is not None:
+        hdu.header["BUNIT"] = bunit
+    hdu.writeto(path, overwrite=True)
+
+def read_counts_bins(counts_ccube_path):
+    with fits.open(counts_ccube_path) as h:
+        hdr = h[0].header
+        eb = h["EBOUNDS"].data
+        emin = np.array(eb["E_MIN"], float)  # keV (for this dataset)
+        emax = np.array(eb["E_MAX"], float)  # keV (for this dataset)
+    ectr = np.sqrt(emin * emax)  # keV or MeV depending on file
+    return hdr, emin, emax, ectr

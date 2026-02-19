@@ -23,6 +23,10 @@ def build_lonlat_cells(*, lon, lat, roi_lon, roi_lat, cell_deg):
     return cells
 
 
+import numpy as np
+from scipy.optimize import minimize, nnls
+
+
 def fit_cellwise_poisson_mle_counts(
     *,
     counts,
@@ -38,25 +42,24 @@ def fit_cellwise_poisson_mle_counts(
     tiny=1e-30,
     maxiter=200,
     init="nnls",
+    column_scale="l2",     # NEW: "l2", "l1", "max", or None
+    drop_tol=0.0,          # NEW: drop templates with column scale <= drop_tol in that cell/bin
+    ridge=0.0,             # NEW: small >=0 regularisation on scaled params (e.g. 1e-6)
 ):
-    """Cell-wise, per-energy-bin Poisson MLE in counts-space.
+    """Cell-wise, per-energy-bin Poisson MLE in counts-space, robust to template scaling.
 
-    Parameters
-    ----------
-    counts: array (nE, ny, nx)
-    templates: dict[str, array] (each (nE, ny, nx)) or list/tuple of arrays
-        Expected counts templates.
-    mask3d: bool array (nE, ny, nx) True=use pixel in fit
+    counts: (nE, ny, nx) observed counts
+    templates: dict[str,(nE,ny,nx)] or list of arrays (expected counts templates; can be unnormalised)
+    mask3d: bool (nE, ny, nx) True = use pixel in fit
 
     Returns
     -------
-    result: dict
-        - cells: list[bool2d]
-        - coeff_cells: (nCells, nE, nComp)
-        - labels: list[str]
-        - info: dict(success, nll, message)
+    dict with:
+      - cells: list[bool2d]
+      - coeff_cells: (nCells, nE, nComp) coefficients in ORIGINAL template units
+      - labels: list[str]
+      - info: dict(success, nll, message, dropped, scales)
     """
-
     counts = np.asarray(counts, dtype=float)
     mask3d = np.asarray(mask3d, dtype=bool)
     if counts.shape != mask3d.shape:
@@ -64,14 +67,14 @@ def fit_cellwise_poisson_mle_counts(
 
     nE = counts.shape[0]
     spatial_shape = counts.shape[1:]
-    if np.asarray(lon).shape != spatial_shape or np.asarray(lat).shape != spatial_shape:
+    lon = np.asarray(lon)
+    lat = np.asarray(lat)
+    if lon.shape != spatial_shape or lat.shape != spatial_shape:
         raise ValueError("lon/lat must match counts spatial shape")
 
+    # --- templates -> list + labels ---
     if isinstance(templates, dict):
-        if component_order is None:
-            labels = list(templates.keys())
-        else:
-            labels = list(component_order)
+        labels = list(templates.keys()) if component_order is None else list(component_order)
         tpl_list = [np.asarray(templates[k], dtype=float) for k in labels]
     elif isinstance(templates, (list, tuple)):
         tpl_list = [np.asarray(t, dtype=float) for t in templates]
@@ -86,6 +89,7 @@ def fit_cellwise_poisson_mle_counts(
         if T.shape != counts.shape:
             raise ValueError(f"template '{labels[j]}' shape {T.shape} != counts shape {counts.shape}")
 
+    # User-provided helper
     cells = build_lonlat_cells(lon=lon, lat=lat, roi_lon=roi_lon, roi_lat=roi_lat, cell_deg=cell_deg)
     nCells = len(cells)
     nComp = len(tpl_list)
@@ -95,21 +99,47 @@ def fit_cellwise_poisson_mle_counts(
     nll_vals = np.full((nCells, nE), np.nan, dtype=float)
     messages = np.empty((nCells, nE), dtype=object)
 
-    def _initial_guess(y, X):
-        if init == "ones":
-            return np.full(nComp, max(np.sum(y) / max(nComp, 1), 1.0), dtype=float)
-        if init == "lsq":
-            a, *_ = np.linalg.lstsq(X, y, rcond=None)
-            return np.clip(a, 0.0, None) if nonneg else a
-        try:
-            a0, _ = nnls(X, y)
-            if (not np.isfinite(a0).all()) or np.all(a0 == 0):
-                a0 = np.full(nComp, 1e-3, dtype=float)
-            return a0
-        except Exception:
-            return np.full(nComp, 1e-3, dtype=float)
+    # diagnostics
+    dropped = np.zeros((nCells, nE, nComp), dtype=bool)
+    scales_store = np.full((nCells, nE, nComp), np.nan, dtype=float)
 
     bounds = [(0.0, None)] * nComp if nonneg else [(None, None)] * nComp
+
+    def _col_scale(X):
+        if column_scale is None:
+            s = np.ones(X.shape[1], dtype=float)
+        elif column_scale == "l2":
+            s = np.sqrt(np.sum(X * X, axis=0))
+        elif column_scale == "l1":
+            s = np.sum(np.abs(X), axis=0)
+        elif column_scale == "max":
+            s = np.max(np.abs(X), axis=0)
+        else:
+            raise ValueError("column_scale must be one of: None, 'l2', 'l1', 'max'")
+        return np.maximum(s, 0.0)
+
+    def _initial_guess(y, X_scaled, active_idx):
+        """Return a0 for the active (non-dropped) parameters in SCALED space."""
+        nA = len(active_idx)
+        if nA == 0:
+            return np.zeros(0, dtype=float)
+
+        if init == "ones":
+            # roughly match total counts
+            return np.full(nA, max(np.sum(y) / max(nA, 1), 1.0), dtype=float)
+
+        if init == "lsq":
+            a, *_ = np.linalg.lstsq(X_scaled, y, rcond=None)
+            return np.clip(a, 0.0, None) if nonneg else a
+
+        # nnls is good in scaled space
+        try:
+            a0, _ = nnls(X_scaled, y)
+            if (not np.isfinite(a0).all()) or np.all(a0 == 0):
+                a0 = np.full(nA, 1e-3, dtype=float)
+            return a0
+        except Exception:
+            return np.full(nA, 1e-3, dtype=float)
 
     for ci, cell2d in enumerate(cells):
         for k in range(nE):
@@ -128,49 +158,89 @@ def fit_cellwise_poisson_mle_counts(
                 messages[ci, k] = "no finite pixels"
                 continue
 
-            def nll_and_grad(a):
-                mu = X @ a
+            # Column scaling (per cell+bin)
+            s = _col_scale(X)
+            scales_store[ci, k, :] = s
+
+            active = s > drop_tol
+            if not np.any(active):
+                messages[ci, k] = "all templates dropped by scale"
+                continue
+
+            dropped[ci, k, :] = ~active
+
+            X_a = X[:, active]
+            s_a = s[active]
+            X_scaled = X_a / s_a[None, :]
+
+            # Work in scaled parameter space: a = a_scaled / s
+            # mu = X_a @ a = (X_a/s) @ a_scaled = X_scaled @ a_scaled
+            def nll_and_grad_scaled(a_scaled):
+                mu = X_scaled @ a_scaled
                 mu = np.clip(mu, tiny, None)
                 nll = np.sum(mu - y * np.log(mu))
+
+                # optional ridge in scaled params (helps collinearity)
+                if ridge > 0:
+                    nll = nll + 0.5 * ridge * float(np.dot(a_scaled, a_scaled))
+
                 r = 1.0 - (y / mu)
-                grad = X.T @ r
+                grad = X_scaled.T @ r
+                if ridge > 0:
+                    grad = grad + ridge * a_scaled
                 return nll, grad
 
-            def fun(a):
-                v, _ = nll_and_grad(a)
+            def fun(a_scaled):
+                v, _ = nll_and_grad_scaled(a_scaled)
                 return v
 
-            def jac(a):
-                _, g = nll_and_grad(a)
+            def jac(a_scaled):
+                _, g = nll_and_grad_scaled(a_scaled)
                 return g
 
-            a0 = _initial_guess(y, X)
+            a0_scaled = _initial_guess(y, X_scaled, np.where(active)[0])
+
+            # bounds in scaled space map directly if nonneg
+            if nonneg:
+                bounds_a = [(0.0, None)] * X_scaled.shape[1]
+            else:
+                bounds_a = [(None, None)] * X_scaled.shape[1]
+
             opt = minimize(
                 fun,
-                x0=a0,
+                x0=a0_scaled,
                 jac=jac,
-                bounds=bounds,
+                bounds=bounds_a,
                 method="L-BFGS-B",
                 options={"maxiter": int(maxiter)},
             )
 
-            coeff_cells[ci, k] = opt.x
+            # Unscale back to original parameterisation
+            a_scaled = opt.x
+            a_active = a_scaled / s_a
+
+            a_full = np.zeros(nComp, dtype=float)
+            a_full[active] = a_active
+            # dropped templates remain 0
+
+            coeff_cells[ci, k, :] = a_full
             success[ci, k] = bool(opt.success)
             nll_vals[ci, k] = float(opt.fun)
             messages[ci, k] = str(opt.message)
 
-    info = {"success": success, "nll": nll_vals, "message": messages}
+    info = {
+        "success": success,
+        "nll": nll_vals,
+        "message": messages,
+        "dropped": dropped,
+        "scales": scales_store,
+        "column_scale": column_scale,
+        "drop_tol": drop_tol,
+        "ridge": ridge,
+    }
     return {"cells": cells, "coeff_cells": coeff_cells, "labels": labels, "info": info}
 
-
 def per_bin_total_counts_from_cellwise_coeffs(*, cells, coeff_cells, templates, mask3d):
-    """Convert cellwise multipliers into per-bin total counts per component.
-
-    templates: list of arrays (nE, ny, nx) matching coeff_cells last axis.
-    mask3d: boolean keep mask applied to the summation.
-
-    Returns array totals (nE, nComp).
-    """
     mask3d = np.asarray(mask3d, dtype=bool)
     nCells, nE, nComp = coeff_cells.shape
     if len(templates) != nComp:
@@ -186,7 +256,8 @@ def per_bin_total_counts_from_cellwise_coeffs(*, cells, coeff_cells, templates, 
             if not np.all(np.isfinite(a)):
                 continue
             for j in range(nComp):
-                s = float(np.nansum(np.asarray(templates[j])[k][cm]))
-                if np.isfinite(s) and s != 0.0:
-                    out[k, j] += float(a[j]) * s
+                T = np.asarray(templates[j])[k]
+                s = float(np.nansum(T[cm]))
+                if np.isfinite(s):
+                    out[k, j] += a[j] * s
     return out
