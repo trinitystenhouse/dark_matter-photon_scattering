@@ -35,11 +35,13 @@ from astropy.io import fits
 from astropy.wcs import WCS
 
 from totani_helpers.totani_io import (
+    lonlat_grids,
     pixel_solid_angle_map,
-    read_expcube_energies_mev,
-    resample_exposure_logE_interp,
+    read_counts_and_ebounds,
+    read_exposure,
+    resample_exposure_logE,
+    write_cube,
 )
-
 # ----------------------------
 # NFW + LOS projection helpers
 # ----------------------------
@@ -67,34 +69,41 @@ def los_r_kpc(lon_deg, lat_deg, s_kpc, R0_kpc=8.0):
     return np.sqrt(np.maximum(r2, 0.0))
 
 
-def make_los_grid_kpc(rvir_kpc=402.0, R0_kpc=8.0, n_s=2048, smax_kpc=None):
+def make_u_grid(n_s=1024):
     """
-    Build a 1D LOS distance grid s in kpc and weights ds for integration.
-    We integrate from s=0 to s=smax. If smax not provided, use R0 + rvir.
+    Unit integration coordinate u in [0,1] for per-pixel mapping to s in [s0, smax(l,b)].
+    """
+    u = np.linspace(0.0, 1.0, int(n_s), dtype=np.float64)
+    return u
 
-    Uses a mixed grid: dense at small s (log), then linear tail.
-    This reduces error near the GC without insane n_s.
+
+def make_los_grid_kpc(*, rvir_kpc=402.0, R0_kpc=8.0, n_s=4096, smax_kpc=None):
+    """Linear LOS grid for 1D integrations.
+
+    Returns:
+      s_mid: (n_s,) midpoints in kpc
+      ds: (n_s,) bin widths in kpc
     """
     if smax_kpc is None:
-        smax_kpc = R0_kpc + rvir_kpc  # safely beyond far edge for most directions
-
-    # fraction for log portion
-    f_log = 0.6
-    n_log = max(16, int(f_log * n_s))
-    n_lin = max(16, n_s - n_log)
-
-    s_min = 1e-6  # kpc
-    s_break = min(5.0, 0.2 * smax_kpc)  # put breakpoint at a few kpc-ish
-
-    s_log = np.geomspace(s_min, s_break, n_log, endpoint=False)
-    s_lin = np.linspace(s_break, smax_kpc, n_lin)
-
-    s = np.concatenate([s_log, s_lin])
-    ds = np.diff(s)
-    # for simple Riemann: use midpoints
-    s_mid = 0.5 * (s[:-1] + s[1:])
+        smax_kpc = float(R0_kpc + rvir_kpc)
+    edges = np.linspace(0.0, float(smax_kpc), int(n_s) + 1, dtype=np.float64)
+    ds = np.diff(edges)
+    s_mid = 0.5 * (edges[:-1] + edges[1:])
     return s_mid, ds
 
+def smax_to_rvir_kpc(lon_deg, lat_deg, R0_kpc=8.0, rvir_kpc=402.0):
+    """
+    Far intersection distance (forward LOS) where r(s)=rvir.
+    Solve: s^2 - 2 R0 cospsi s + (R0^2 - rvir^2) = 0
+    """
+    l = np.deg2rad(lon_deg)
+    b = np.deg2rad(lat_deg)
+    cospsi = np.cos(b) * np.cos(l)
+
+    disc = (R0_kpc * cospsi)**2 - (R0_kpc**2 - rvir_kpc**2)
+    disc = np.maximum(disc, 0.0)
+    s_far = R0_kpc * cospsi + np.sqrt(disc)
+    return np.maximum(s_far, 0.0)
 
 def los_integral_rhopow_map(
     lon2d,
@@ -105,38 +114,62 @@ def los_integral_rhopow_map(
     rhos=8.1e6,
     R0_kpc=8.0,
     rvir_kpc=402.0,
-    n_s=2048,
-    smax_kpc=None,
-    chunk=8,
+    n_s=1024,
+    s0_kpc=1e-3,          # start > 0 for log spacing
+    s_spacing="log",      # "log" or "linear"
+    chunk=8,              # stripe height
 ):
     """
-    Compute J_p(l,b) = ∫ rho(r(l,b,s))^p ds on a 2D lon/lat grid.
-
-    chunk: process in lat-stripes to limit memory
+    J_p(l,b) = ∫_0^{smax(l,b)} rho(r(l,b,s))^p ds, truncated at rvir via smax(l,b).
+    Vectorized over s for each stripe for speed.
     """
     ny, nx = lon2d.shape
     J = np.zeros((ny, nx), dtype=np.float64)
 
-    s_mid, ds = make_los_grid_kpc(rvir_kpc=rvir_kpc, R0_kpc=R0_kpc, n_s=n_s, smax_kpc=smax_kpc)
+    u = make_u_grid(n_s=n_s)
 
-    # stripe over y to avoid allocating huge (ny,nx,ns)
     for y0 in range(0, ny, chunk):
         y1 = min(ny, y0 + chunk)
-        lon = lon2d[y0:y1, :]
-        lat = lat2d[y0:y1, :]
+        lon = lon2d[y0:y1, :].astype(np.float64)
+        lat = lat2d[y0:y1, :].astype(np.float64)
 
-        acc = np.zeros((y1 - y0, nx), dtype=np.float64)
+        # per-pixel smax to the halo boundary
+        smax = smax_to_rvir_kpc(lon, lat, R0_kpc=R0_kpc, rvir_kpc=rvir_kpc)
 
-        # integrate with simple midpoint rule
-        for si, dsi in zip(s_mid, ds):
-            r = los_r_kpc(lon, lat, si, R0_kpc=R0_kpc)
-            rho = rho_nfw(r, rs_kpc=rs_kpc, rhos=rhos, gamma=gamma)
-            acc += (rho ** rho_power) * dsi
+        # Pixels with essentially zero path length
+        good = smax > s0_kpc
+        if not np.any(good):
+            continue
 
-        J[y0:y1, :] = acc
+        # Build s-grid per pixel: s has shape (n_s, NyStripe, Nx)
+        if s_spacing == "log":
+            ratio = np.where(good, smax / s0_kpc, 1.0)
+            s = s0_kpc * (ratio[None, :, :] ** u[:, None, None])
+        elif s_spacing == "linear":
+            s = s0_kpc + (smax[None, :, :] - s0_kpc) * u[:, None, None]
+        else:
+            raise ValueError("s_spacing must be 'log' or 'linear'")
+
+        # r(s)^2 = R0^2 + s^2 - 2 R0 s cospsi
+        lrad = np.deg2rad(lon)
+        brad = np.deg2rad(lat)
+        cospsi = np.cos(brad) * np.cos(lrad)
+
+        r2 = (R0_kpc**2 + s**2 - 2.0 * R0_kpc * s * cospsi[None, :, :])
+        r = np.sqrt(np.maximum(r2, 0.0))
+
+        rho = rho_nfw(r, rs_kpc=rs_kpc, rhos=rhos, gamma=gamma)
+        integrand = rho ** rho_power
+
+        # Trapezoid integrate along s axis (axis=0)
+        _trapezoid = getattr(np, "trapezoid", np.trapz)
+        Jstripe = _trapezoid(integrand, s, axis=0)
+
+        # If smax <= s0, Jstripe is junk; enforce mask
+        Jstripe[~good] = 0.0
+        J[y0:y1, :] = Jstripe
 
     return J
-
 
 def pole_normalization_value(
     rho_power=2.0,
@@ -192,7 +225,7 @@ def main():
     ap.add_argument(
         "--norm",
         choices=["pole", "roi-sum", "pole+roi-sum"],
-        default="pole+roi-sum",
+        default="pole",
         help="How to normalize the spatial template.",
     )
 
@@ -228,50 +261,26 @@ def main():
     out_e2dnde = os.path.join(outdir, f"nfw{suffix}_E2dnde.fits")
     out_mu = os.path.join(outdir, f"mu_nfw{suffix}_counts.fits")
 
-    # --- Read CCUBE header + EBOUNDS ---
-    with fits.open(counts) as hc:
-        hdr = hc[0].header
-        wcs = WCS(hdr).celestial
-        ny, nx = hdr["NAXIS2"], hdr["NAXIS1"]
+    # --- Read CCUBE (authoritative WCS + EBOUNDS) ---
+    counts_cube, hdr, _Emin, _Emax, Ectr_mev, dE_mev = read_counts_and_ebounds(counts)
+    nE, ny, nx = counts_cube.shape
+    wcs = WCS(hdr).celestial
 
-        if "EBOUNDS" not in hc:
-            raise RuntimeError("Counts CCUBE missing EBOUNDS extension.")
-        eb = hc["EBOUNDS"].data
-        eb_hdu = hc["EBOUNDS"].copy()
-
-    Emin_kev = np.array(eb["E_MIN"], dtype=float)
-    Emax_kev = np.array(eb["E_MAX"], dtype=float)
-
-    Emin_mev = Emin_kev / 1000.0
-    Emax_mev = Emax_kev / 1000.0
-    dE_mev = (Emax_mev - Emin_mev)
-    Ectr_mev = np.sqrt(Emin_mev * Emax_mev)
-    nE = int(Ectr_mev.size)
-
-    # --- Read exposure cube + resample to CCUBE E bins ---
-    with fits.open(expo_path) as he:
-        expo_raw = np.array(he[0].data, dtype=np.float64)
-        E_expo_mev = read_expcube_energies_mev(he)
-
+    # --- Read exposure cube + energies, resample to CCUBE binning ---
+    expo_raw, E_expo_mev = read_exposure(expo_path)
     if expo_raw.shape[1:] != (ny, nx):
         raise RuntimeError(f"Exposure spatial shape {expo_raw.shape[1:]} != counts {(ny, nx)}")
-
-    if args.expo_sampling == "center":
-        expo = resample_exposure_logE_interp(expo_raw, E_expo_mev, Ectr_mev)
-        expo_comment = "Exposure evaluated at CCUBE bin centers Ectr, interpolated linearly in logE (clamped)."
-    else:
-        expo_min = resample_exposure_logE_interp(expo_raw, E_expo_mev, Emin_mev)
-        expo_max = resample_exposure_logE_interp(expo_raw, E_expo_mev, Emax_mev)
-        expo = 0.5 * (expo_min + expo_max)
-        expo_comment = "Exposure = 0.5*(expo(Emin)+expo(Emax)), each interpolated linearly in logE (clamped)."
-
+    expo = resample_exposure_logE(expo_raw, E_expo_mev, Ectr_mev)
     if expo.shape[0] != nE:
         raise RuntimeError(f"Resampled exposure has {expo.shape[0]} planes, expected {nE}")
+    expo_comment = "Exposure resampled to CCUBE E bins using logE interpolation."
 
     # --- lon/lat grid ---
-    yy, xx = np.mgrid[:ny, :nx]
-    lon, lat = wcs.pixel_to_world_values(xx, yy)
-    lon = ((lon + 180.0) % 360.0) - 180.0
+    lon, lat = lonlat_grids(wcs, ny, nx)
+
+    # --- Restrict to pixels with actual data coverage (template footprint) ---
+    data_ok3d = np.isfinite(counts_cube) & np.isfinite(expo) & (expo > 0)
+    data_ok2d = np.any(data_ok3d, axis=0)
 
     # --- Compute LOS-projected NFW template J_p(l,b) ---
     J = los_integral_rhopow_map(
@@ -284,15 +293,14 @@ def main():
         R0_kpc=args.R0_kpc,
         rvir_kpc=args.rvir_kpc,
         n_s=args.n_s,
-        smax_kpc=args.smax_kpc,
-        chunk=args.chunk,
     )
 
     # ROI mask (keep exactly as your pipeline)
     roi = (np.abs(lon) <= args.roi_lon) & (np.abs(lat) <= args.roi_lat)
+    roi &= data_ok2d
     J[~roi] = 0.0
 
-    # --- Normalization ---
+    # Optional: pole normalisation (interpretability)
     if args.norm in ("pole", "pole+roi-sum"):
         Jpole = pole_normalization_value(
             rho_power=args.rho_power,
@@ -301,81 +309,47 @@ def main():
             rhos=args.rhos,
             R0_kpc=args.R0_kpc,
             rvir_kpc=args.rvir_kpc,
-            n_s=max(4096, args.n_s),  # make pole norm stable
+            n_s=max(4096, args.n_s),
             smax_kpc=args.smax_kpc,
         )
         if not np.isfinite(Jpole) or Jpole <= 0:
             raise RuntimeError("Pole normalization integral is non-positive.")
         J = J / Jpole
 
-    if args.norm in ("roi-sum", "pole+roi-sum"):
-        s_roi = float(np.nansum(J[roi]))
-        if not np.isfinite(s_roi) or s_roi <= 0:
-            raise RuntimeError("ROI sum normalization failed (template is zero in ROI).")
-        J = J / s_roi
+    # For fitting stability: normalise spatial template to mean=1 within ROI
+    # vals = J[roi]
+    # vals = vals[np.isfinite(vals) & (vals > 0)]
+    # if vals.size == 0:
+    #     raise RuntimeError("NFW template is zero in ROI after masking.")
+    # J = J / np.mean(vals)
 
     nfw_spatial = J.astype(np.float64)
 
-    # --- solid angle map (match fitter conventions) ---
+    # Solid angle map
     omega = pixel_solid_angle_map(wcs, ny, nx, args.binsz)
+    # Pole pixel is not exactly b=90 in your ROI grid, so sample a small cap
+    pole_cap = roi & (lat > 59.0)  # or > 55, depending on ROI
+    print("mean J in pole cap:", np.mean(J[pole_cap]))
 
-    # --- PHENO mode: energy-independent shape replicated across bins ---
-    mu_nfw = np.broadcast_to(nfw_spatial[None, :, :], (nE, ny, nx)).astype(np.float64).copy()
 
-    denom = expo * omega[None, :, :] * dE_mev[:, None, None]
+    # --- COUNTS TEMPLATE (this is what your mu_list expects) ---
+    # denom here is the factor that converts flux -> counts
+    conv = expo * omega[None, :, :] * dE_mev[:, None, None]   # shape (nE,ny,nx)
+    mu_nfw = nfw_spatial[None, :, :] * conv                   # shape (nE,ny,nx)
+
     nfw_dnde = np.full_like(mu_nfw, np.nan, dtype=np.float64)
-    ok = np.isfinite(denom) & (denom > 0)
-    nfw_dnde[ok] = mu_nfw[ok] / denom[ok]
+    ok = np.isfinite(conv) & (conv > 0)
+    nfw_dnde[ok] = mu_nfw[ok] / conv[ok]        # equals nfw_spatial broadcast, by construction
     nfw_E2dnde = nfw_dnde * (Ectr_mev[:, None, None] ** 2)
+
 
     # -------------------------
     # Write outputs (include EBOUNDS so checkers don’t need counts file)
     # -------------------------
-    def _write_cube(path, data, bunit, comments):
-        phdu = fits.PrimaryHDU(data.astype(np.float32), header=hdr)
-        phdu.header["BUNIT"] = bunit
-        for c in comments:
-            phdu.header["COMMENT"] = c
-        hdul = fits.HDUList([phdu, eb_hdu])
-        hdul.writeto(path, overwrite=True)
 
-    comments_main = [
-        "LOS-projected NFW template: J_p(l,b) = int rho(r(l,b,s))^p ds",
-        f"Profile: gNFW with gamma={args.gamma:g}, rs={args.rs_kpc:g} kpc, R0={args.R0_kpc:g} kpc, rvir={args.rvir_kpc:g} kpc",
-        f"rho_power p = {args.rho_power:g}",
-        f"LOS grid: n_s={args.n_s:d}, smax={args.smax_kpc if args.smax_kpc is not None else (args.R0_kpc + args.rvir_kpc):g} kpc",
-        f"Normalization: {args.norm}",
-        "ROI cut applied: |l|<=roi_lon and |b|<=roi_lat; outside ROI set to 0",
-        expo_comment,
-    ]
-
-    _write_cube(
-        out_dnde,
-        nfw_dnde,
-        "ph cm-2 s-1 sr-1 MeV-1",
-        comments_main,
-    )
-
-    _write_cube(
-        out_e2dnde,
-        nfw_E2dnde,
-        "MeV cm-2 s-1 sr-1",
-        [
-            "E^2 dN/dE version of NFW template",
-            "(Derived from dnde using Ectr^2, where Ectr from CCUBE EBOUNDS geometric mean.)",
-            expo_comment,
-        ],
-    )
-
-    _write_cube(
-        out_mu,
-        mu_nfw,
-        "counts",
-        [
-            "Expected counts = dN/dE * exposure * Omega_pix * dE",
-            expo_comment,
-        ],
-    )
+    write_cube(out_dnde, nfw_dnde, hdr, bunit="ph cm-2 s-1 sr-1 MeV-1")
+    write_cube(out_e2dnde, nfw_E2dnde, hdr, bunit="MeV cm-2 s-1 sr-1")
+    write_cube(out_mu, mu_nfw, hdr, bunit="counts")
 
     print("✓ wrote", out_dnde)
     print("✓ wrote", out_e2dnde)
