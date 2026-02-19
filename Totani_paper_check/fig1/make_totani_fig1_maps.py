@@ -25,8 +25,22 @@ from astropy.wcs import WCS
 from astropy.visualization import simple_norm
 from astropy.coordinates import SkyCoord
 import astropy.units as u
-from totani_helpers.totani_io import *
+from totani_helpers.totani_io import (
+    load_mask_any_shape,
+    lonlat_grids,
+    pixel_solid_angle_map,
+    read_counts_and_ebounds,
+    read_exposure,
+    resample_exposure_logE,
+    resample_exposure_logE_interp,
+    read_expcube_energies_mev,
+    smooth_nan_2d,
+)
+from totani_helpers.fit_utils import build_fit_mask3d
+from totani_helpers.fit_utils import component_counts_from_cellwise_fit
+from totani_helpers.cellwise_fit import fit_cellwise_poisson_mle_counts
 from scipy.optimize import nnls
+from scipy.ndimage import gaussian_filter
 
 try:
     from skimage.measure import find_contours
@@ -66,6 +80,7 @@ MU_LOOPI = os.path.join(DATA_DIR, "processed", "templates", "mu_loopI_counts.fit
 BUBBLES_POS_DNDE = os.path.join(DATA_DIR, "processed", "templates", "bubbles_pos_dnde.fits")
 BUBBLES_NEG_DNDE = os.path.join(DATA_DIR, "processed", "templates", "bubbles_neg_dnde.fits")
 BUBBLES_FLAT_DNDE = os.path.join(DATA_DIR, "processed", "templates", "fb_flat_dnde.fits")
+MU_FB_FLAT = os.path.join(DATA_DIR, "processed", "templates", "mu_fb_flat_counts.fits")
 
 BUBBLE_MASK_FITS = os.path.join(DATA_DIR, "processed", "templates", "bubbles_flat_binary_mask.fits")
 
@@ -74,71 +89,6 @@ MARKER_RADIUS_DEG = 1.0
 MARKER_LW = 1.0
 
 # -------------------------
-
-
-def fit_bin_weighted_nnls(counts_2d, mu_components, mask_2d, eps=1.0):
-    """
-    Weighted NNLS fit:
-      minimize || W (X a - y) ||_2, with a>=0
-    Weight ~ 1/sqrt(y+eps) (Poisson-ish).
-    """
-    m = mask_2d.ravel()
-    y = counts_2d.ravel()[m]
-    X = np.vstack([mu.ravel()[m] for mu in mu_components]).T
-
-    w = 1.0 / np.sqrt(np.maximum(y, 0.0) + eps)
-    yw = y * w
-    Xw = X * w[:, None]
-
-    A, _ = nnls(Xw, yw)
-    return A
-
-
-def build_total_model_cube(counts_cube, mu_cubes, mask_all, labels, eps=1.0):
-    """
-    Fit each energy bin with NNLS and build model sum cube.
-    Returns:
-      mu_modelsum (nE,ny,nx)
-      A (nE,ncomp)
-    """
-    nE, ny, nx = counts_cube.shape
-    ncomp = len(mu_cubes)
-
-    A = np.zeros((nE, ncomp), dtype=np.float64)
-    mu_modelsum = np.zeros((nE, ny, nx), dtype=np.float64)
-
-    for k in range(nE):
-        mk = mask_all[k]
-        if not np.any(mk):
-            # nothing to fit
-            continue
-
-        mu_components_k = [mu[k] for mu in mu_cubes]
-        Ak = fit_bin_weighted_nnls(counts_cube[k], mu_components_k, mk, eps=eps)
-        A[k] = Ak
-
-        # Build model sum everywhere (but keep masked pixels at 0 for clarity)
-        model_k = np.zeros((ny, nx), dtype=np.float64)
-        for i, mu in enumerate(mu_components_k):
-            model_k += Ak[i] * mu
-        model_k[~mk] = 0.0
-        mu_modelsum[k] = model_k
-
-        if (k % 5) == 0 or (k == nE - 1):
-            msg = " ".join([f"{labels[i]}={Ak[i]:.3g}" for i in range(ncomp)])
-            print(f"[fit] k={k:02d}  " + msg)
-
-    return mu_modelsum, A
-
-
-def load_mask_2d(mask_path, shape_2d):
-    m = fits.getdata(mask_path)
-    if m.ndim == 3:
-        m = m[0]
-    m = np.asarray(m)
-    if m.shape != shape_2d:
-        raise RuntimeError(f"Mask shape {m.shape} not compatible with expected {shape_2d}")
-    return (np.isfinite(m) & (m != 0))
 
 
 def read_extended_sources(psc_path):
@@ -166,39 +116,40 @@ def read_extended_sources(psc_path):
 # -------------------------
 # Load data
 # -------------------------
+counts, hdr, Emin, Emax, Ectr, dE = read_counts_and_ebounds(COUNTS)
+nE, ny, nx = counts.shape
+wcs = WCS(hdr).celestial
+
 with fits.open(COUNTS) as h:
-    counts = h[0].data.astype(float)
-    hdr = h[0].header
-    eb = h["EBOUNDS"].data
     eb_hdu = h["EBOUNDS"].copy()
 
-with fits.open(EXPO) as h:
-    expo_raw = np.array(h[0].data, dtype=np.float64)
-    E_expo = read_expcube_energies_mev(h)
+expo_raw, E_expo = read_exposure(EXPO)
+if expo_raw.shape[1:] != (ny, nx):
+    raise RuntimeError(f"Exposure grid {expo_raw.shape[1:]} != counts grid {(ny, nx)}")
+expo = resample_exposure_logE(expo_raw, E_expo, Ectr)
+if expo.shape[0] != nE:
+    raise RuntimeError("Exposure resampling did not produce same nE as counts")
 
-nE, ny, nx = counts.shape
-ps_mask = load_mask_any_shape(PSMASK, counts.shape)  # assumes your helper returns (nE,ny,nx) bool keep-mask
+ps_mask = load_mask_any_shape(PSMASK, counts.shape)  # (nE,ny,nx) bool keep-mask
 
-Ectr = np.sqrt(eb["E_MIN"] * eb["E_MAX"]) / 1000.0  # MeV
-dE = (eb["E_MAX"] - eb["E_MIN"]) / 1000.0  # MeV
-
-expo = resample_exposure_logE_interp(expo_raw, E_expo, Ectr)
-
-wcs = WCS(hdr).celestial
 omega = pixel_solid_angle_map(wcs, ny, nx, binsz_deg=BINSZ_DEG)
 
+# Lon/lat for ROI etc.
+lon, lat = lonlat_grids(wcs, ny, nx)
+
 # Disk cut mask (2D)
-yy, xx = np.mgrid[:ny, :nx]
-_, lat = wcs.pixel_to_world_values(xx, yy)
 disk_mask2d = np.abs(lat) >= DISK_CUT_DEG
 
-# Lon/lat for ROI etc.
-lon, lat2 = wcs.pixel_to_world_values(xx, yy)
-lon_w = ((lon + 180.0) % 360.0) - 180.0
-roi2d = (np.abs(lon_w) <= ROI_LON_DEG) & (np.abs(lat2) <= ROI_LAT_DEG)
+roi2d = (np.abs(lon) <= ROI_LON_DEG) & (np.abs(lat) <= ROI_LAT_DEG)
 
-# Full keep-mask used for fitting (nE,ny,nx)
-mask_all = ps_mask & disk_mask2d[None, :, :] & roi2d[None, :, :]
+# Full keep-mask used for fitting (nE,ny,nx): ROI & disk & srcmask & data coverage
+mask_all = build_fit_mask3d(
+    roi2d=roi2d,
+    srcmask3d=ps_mask,
+    counts=counts,
+    expo=expo,
+    extra2d=disk_mask2d,
+)
 
 # -------------------------
 # Load counts templates
@@ -217,48 +168,51 @@ mu_ps = _read_cube(MU_PS, counts.shape)
 mu_nfw = _read_cube(MU_NFW, counts.shape)
 mu_loopi = _read_cube(MU_LOOPI, counts.shape)
 
-# Optional: include flat FB in the baseline fit (recommended for Totani step-1)
-# We have bubbles_flat_dnde; convert it to mu_flat_counts per bin.
-bubbles_flat_dnde = _read_cube(BUBBLES_FLAT_DNDE, counts.shape)
-mu_flat = (bubbles_flat_dnde > 0).astype(np.float64)
+if os.path.exists(MU_FB_FLAT):
+    mu_flat = _read_cube(MU_FB_FLAT, counts.shape)
+else:
+    bubbles_flat_dnde = _read_cube(BUBBLES_FLAT_DNDE, counts.shape)
+    mu_flat = (bubbles_flat_dnde > 0).astype(np.float64)
 
 # -------------------------
 # Fit and write model sum cube
 # -------------------------
-mu_cubes = [mu_gas, mu_ics, mu_iso, mu_ps, mu_nfw, mu_loopi]
-labels = ["gas", "ics", "iso", "ps", "nfw", "loopI"]
+mu_cubes = [mu_gas, mu_ics, mu_iso, mu_ps, mu_nfw, mu_loopi, mu_flat]
+labels = ["gas", "ics", "iso", "ps", "nfw", "loopI", "fb_flat"]
 
+templates_counts = {lab: mu for lab, mu in zip(labels, mu_cubes)}
 
-# include flat FB (Totani initial stage)
-mu_cubes.append(mu_flat)
-labels.append("fb_flat")
+res_fit = fit_cellwise_poisson_mle_counts(
+    counts=counts,
+    templates=templates_counts,
+    mask3d=mask_all,
+    lon=lon,
+    lat=lat,
+    roi_lon=float(ROI_LON_DEG),
+    roi_lat=float(ROI_LAT_DEG),
+    cell_deg=float(CELL_DEG),
+    nonneg=True,
+    column_scale="l2",
+    drop_tol=0.0,
+    ridge=0.0,
+)
+comp_counts, model_counts = component_counts_from_cellwise_fit(
+    templates_counts=templates_counts,
+    res_fit=res_fit,
+    mask3d=mask_all,
+)
 
-mu_modelsum, A = build_total_model_cube(counts, mu_cubes, mask_all, labels, eps=1.0)
+fb_mask2d = None
+if os.path.exists(BUBBLE_MASK_FITS):
+    try:
+        fb_mask2d = fits.getdata(BUBBLE_MASK_FITS).astype(bool)
+        if fb_mask2d.ndim == 3:
+            fb_mask2d = fb_mask2d[0].astype(bool)
+        if fb_mask2d.shape != (ny, nx):
+            fb_mask2d = None
+    except Exception:
+        fb_mask2d = None
 
-# Write total model counts cube
-out_model = os.path.join(OUTDIR, "mu_modelsum_counts.fits")
-phdu = fits.PrimaryHDU(mu_modelsum.astype(np.float32), header=hdr)
-phdu.header["BUNIT"] = "counts"
-phdu.header["COMMENT"] = "Total best-fit model expected counts cube from per-bin NNLS fit."
-phdu.header["COMMENT"] = "Components: " + ", ".join(labels)
-phdu.header["COMMENT"] = "Fit mask: ROI box AND disk cut AND extended-source mask."
-phdu.header["COMMENT"] = f"ROI: |l|<={ROI_LON_DEG:g}, |b|<={ROI_LAT_DEG:g}; disk cut |b|>={DISK_CUT_DEG:g}."
-phdu.header["COMMENT"] = "NNLS is weighted by 1/sqrt(counts+1)."
-fits.HDUList([phdu, eb_hdu]).writeto(out_model, overwrite=True)
-print("✓ wrote", out_model)
-
-# Save coefficients
-out_npz = os.path.join(OUTDIR, "fit_coeffs_per_bin.npz")
-np.savez(out_npz, A=A, labels=np.array(labels, dtype="U"), Ectr_mev=Ectr)
-print("✓ wrote", out_npz)
-
-out_txt = os.path.join(OUTDIR, "fit_coeffs_per_bin.txt")
-with open(out_txt, "w") as f:
-    f.write("# k  Ectr(MeV)  " + "  ".join([f"{lab:>10s}" for lab in labels]) + "\n")
-    for k in range(nE):
-        vals = "  ".join([f"{A[k,i]:10.4e}" for i in range(len(labels))])
-        f.write(f"{k:2d}  {Ectr[k]:10.3f}  {vals}\n")
-print("✓ wrote", out_txt)
 
 ext_coords = None
 if PLOT_EXT_SOURCES and os.path.exists(PSC):
@@ -270,54 +224,56 @@ if PLOT_EXT_SOURCES and os.path.exists(PSC):
 for target_mev in TARGET_MEV:
     k = int(np.argmin(np.abs(Ectr - target_mev)))
 
-    data_k = np.array(counts[k], dtype=float)
-    model_k = np.array(mu_modelsum[k], dtype=float)
-    resid_k = data_k - model_k
     m = mask_all[k]
+    bubble_image_counts_k = np.array(comp_counts["fb_flat"][k], dtype=float) + (np.array(counts[k], dtype=float) - np.array(model_counts[k], dtype=float))
 
-    data_k[~m] = np.nan
-    model_k[~m] = np.nan
-    resid_k[~m] = np.nan
+    denom = np.array(expo[k], dtype=float) * np.array(omega, dtype=float) * float(dE[k])
+    bubble_flux_k = np.full((ny, nx), np.nan, dtype=float)
+    ok = m & np.isfinite(denom) & (denom > 0)
+    bubble_flux_k[ok] = bubble_image_counts_k[ok] / denom[ok]
 
-    fig = plt.figure(figsize=(12, 4.2))
-    for i, (arr, title) in enumerate([
-        (data_k, "Data"),
-        (model_k, "Model"),
-        (resid_k, "Residual (Data-Model)"),
-    ]):
-        ax = fig.add_subplot(1, 3, i + 1, projection=wcs)
-        ax.set_xlabel("l")
-        ax.set_ylabel("b")
+    sig_pix = float(1.0 / BINSZ_DEG)
+    bubble_flux_smooth_k = smooth_nan_2d(bubble_flux_k, sig_pix)
+    bubble_flux_smooth_k[~m] = np.nan
 
-        if i < 2:
-            v = np.where(np.isfinite(arr), np.maximum(arr, 0.0), np.nan)
-            norm = simple_norm(v, stretch="log", min_cut=np.nanpercentile(v, 1.0), max_cut=np.nanpercentile(v, 99.5))
-            im = ax.imshow(v, origin="lower", cmap="magma", norm=norm)
-        else:
-            vmax = np.nanpercentile(np.abs(arr), 99.5)
-            if not np.isfinite(vmax) or vmax <= 0:
-                vmax = 1.0
-            im = ax.imshow(arr, origin="lower", cmap="coolwarm", vmin=-vmax, vmax=vmax)
+    fig = plt.figure(figsize=(6.0, 4.8))
+    ax = fig.add_subplot(1, 1, 1, projection=wcs)
+    ax.set_xlabel("l")
+    ax.set_ylabel("b")
 
-        ax.set_title(f"{title}\nE={Ectr[k]:.3g} GeV (k={k})")
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    if target_mev == TARGET_MEV[0]:
+        vmin, vmax = -5e-10, 5e-10
+    elif target_mev == TARGET_MEV[1]:
+        vmin, vmax = -5e-11, 5e-11
+    else:
+        vmax = np.nanpercentile(np.abs(bubble_flux_smooth_k), 99.5)
+        if not np.isfinite(vmax) or vmax <= 0:
+            vmax = 1.0
+        vmin = -vmax
 
-        if ext_coords is not None:
-            for c in ext_coords:
-                cc = c.galactic
-                ax.add_patch(
-                    Circle(
-                        (cc.l.deg, cc.b.deg),
-                        radius=MARKER_RADIUS_DEG,
-                        transform=ax.get_transform("world"),
-                        fill=False,
-                        lw=MARKER_LW,
-                        edgecolor="0.7",
-                        alpha=0.7,
-                    )
-                )
+    im = ax.imshow(bubble_flux_smooth_k, origin="lower", cmap="coolwarm", vmin=vmin, vmax=vmax)
+    ax.set_title(f"Best-fit bubble image (flux), smoothed $\\sigma$=1$^\\circ$\nE={Ectr[k]:.3g} GeV (k={k})")
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-    out_png = os.path.join(OUTDIR, f"fig1_maps_E{target_mev:.2f}GeV_k{k}.png")
+    if fb_mask2d is not None:
+        try:
+            ax.contour(
+                fb_mask2d.astype(float),
+                levels=[0.5],
+                colors="k",
+                linewidths=1.0,
+                alpha=0.8,
+            )
+        except Exception:
+            ax.imshow(
+                np.where(fb_mask2d, 1.0, np.nan),
+                origin="lower",
+                cmap="gray",
+                alpha=0.12,
+            )
+
+
+    out_png = os.path.join(OUTDIR, f"fig1_bubble_image_flux_smooth1deg_E{target_mev:.0f}MeV_k{k}.png")
     plt.tight_layout()
     plt.savefig(out_png, dpi=200)
     plt.close(fig)
