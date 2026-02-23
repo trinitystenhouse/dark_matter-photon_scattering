@@ -45,6 +45,57 @@ try:
 except Exception:
     HAVE_NNLS = False
 
+
+def _load_mcmc_coeffs_per_energy(*, mcmc_dir: str, nE: int, stat: str = "f_ml"):
+    coeffs_by_name: dict[str, np.ndarray] = {}
+    labels_ref: list[str] | None = None
+
+    for k in range(int(nE)):
+        path = os.path.join(str(mcmc_dir), f"mcmc_results_k{k:02d}.npz")
+        if not os.path.exists(path):
+            continue
+
+        npz = np.load(path, allow_pickle=True)
+        labels = npz["labels"].tolist()
+        labels = [str(x) for x in labels]
+        if labels_ref is None:
+            labels_ref = labels
+        else:
+            if labels != labels_ref:
+                raise RuntimeError(
+                    "MCMC output labels differ across energy bins; cannot build a consistent spectrum."
+                )
+
+        if stat not in npz:
+            raise KeyError(f"MCMC file {path} missing key '{stat}'.")
+        f = np.asarray(npz[stat], float).reshape(-1)
+        if f.shape[0] != len(labels):
+            raise RuntimeError(f"MCMC file {path} has {f.shape[0]} coeffs but {len(labels)} labels")
+
+        for lab, val in zip(labels, f):
+            if lab not in coeffs_by_name:
+                coeffs_by_name[lab] = np.full(int(nE), np.nan, dtype=float)
+            coeffs_by_name[lab][k] = float(val)
+
+    return coeffs_by_name
+
+
+def _pick_coeff_for_template_key(*, coeffs_by_label: dict[str, np.ndarray], template_key: str):
+    if template_key in coeffs_by_label:
+        return coeffs_by_label[template_key]
+
+    if template_key == "nfw":
+        nfw_keys = [k for k in coeffs_by_label.keys() if str(k).lower().startswith("nfw_")]
+        if len(nfw_keys) == 1:
+            return coeffs_by_label[nfw_keys[0]]
+        if len(nfw_keys) > 1:
+            raise RuntimeError(
+                "Multiple MCMC labels start with 'nfw_'. Cannot map template key 'nfw' uniquely."
+            )
+        raise KeyError("Could not find an MCMC coefficient for template key 'nfw'.")
+
+    raise KeyError(f"Could not find an MCMC coefficient for template '{template_key}'.")
+
 def normalise_templates_counts(templates_counts: dict, fit_mask: np.ndarray):
     """
     For each template name, compute norm[k] = sum(template[k] in fit_mask[k] (if 3D) or fit_mask (if 2D))
@@ -296,6 +347,28 @@ def plot_E2_dnde(Ectr_mev, E2_dnde_mev, *, out_png=None, label="Background"):
         plt.close()
     else:
         plt.show()
+
+
+def _build_counts_cubes_from_coeffs(*, templates_counts: dict, coeffs_by_label: dict[str, np.ndarray]):
+    names = list(templates_counts.keys())
+    first = templates_counts[names[0]]
+    nE, ny, nx = first.shape
+
+    comp_counts = {}
+    model_total = np.zeros((nE, ny, nx), dtype=float)
+
+    for name in names:
+        T = np.asarray(templates_counts[name], float)
+        a = _pick_coeff_for_template_key(coeffs_by_label=coeffs_by_label, template_key=name)
+        a = np.asarray(a, float).reshape(-1)
+        if a.shape[0] != nE:
+            raise RuntimeError(f"Coeff for '{name}' has length {a.shape[0]} but nE={nE}")
+
+        cube = a[:, None, None] * T
+        comp_counts[name] = cube
+        model_total += cube
+
+    return comp_counts, model_total
 
 
 def plot_E2_dnde_multi(Ectr_mev, curves, *, out_png=None, title=None):
@@ -747,6 +820,23 @@ def main():
 
     p.add_argument("--outdir", default=os.path.join(os.path.dirname(__file__), "plots_fig2_3"))
 
+    p.add_argument(
+        "--use-mcmc",
+        action="store_true",
+        help="Use saved MCMC outputs (mcmc_results_kXX.npz) to build spectra instead of refitting.",
+    )
+    p.add_argument(
+        "--mcmc-dir",
+        default=os.path.join(repo_dir, "Totani_paper_check", "mcmc", "mcmc_results"),
+        help="Directory containing mcmc_results_kXX.npz files.",
+    )
+    p.add_argument(
+        "--mcmc-stat",
+        choices=["f_ml", "f_p50", "f_p16", "f_p84"],
+        default="f_ml",
+        help="Which MCMC summary coefficient to use per bin.",
+    )
+
     p.add_argument("--roi-lon", type=float, default=60.0)
     p.add_argument("--roi-lat", type=float, default=60.0)
     p.add_argument("--disk-cut", type=float, default=10.0, help="Disk cut: exclude |b|<disk_cut in Fig 3 plot")
@@ -844,60 +934,128 @@ def main():
     args.fit_mode = "cellwise"
     args.cell_deg = 10.0
 
-    component_order = list(templates_counts.keys())
-    res_fit = fit_cellwise_poisson_mle_counts(
-        counts=counts,
-        templates=templates_counts,
-        mask3d=fit_mask3d,
-        lon=lon,
-        lat=lat,
-        roi_lon=float(args.roi_lon),
-        roi_lat=float(args.roi_lat),
-        cell_deg=float(args.cell_deg),
-        component_order=component_order,
-        nonneg=True,
-    )
+    if args.use_mcmc:
+        coeffs_by_label = _load_mcmc_coeffs_per_energy(mcmc_dir=args.mcmc_dir, nE=nE, stat=args.mcmc_stat)
+        comp_counts_dict, model_counts_total = _build_counts_cubes_from_coeffs(
+            templates_counts=templates_counts,
+            coeffs_by_label=coeffs_by_label,
+        )
+        bkg_names = list(templates_counts.keys())
 
-    comp_counts_dict, model_counts_total = component_counts_from_cellwise_fit(
-        templates_counts=templates_counts,
-        res_fit=res_fit,
-        mask3d=fit_mask3d,
-    )
-    resid_counts = np.asarray(counts, float).copy()
-    resid_counts[~fit_mask3d] = np.nan
-    resid_counts = resid_counts - model_counts_total
-
-    bkg_names = component_order
-
-    # 5) plot each fitted component separately (in counts units -> mean dN/dE)
-    curves = []
-    for name in bkg_names:
-        _mean_dnde, E2_comp = mean_E2_dnde_background(
+        # Fig2: include disk (use fit mask's conservative 2D mask)
+        curves2 = []
+        for name in bkg_names:
+            _mean_dnde, E2_comp = mean_E2_dnde_background(
+                Ectr_mev=Ectr_mev,
+                dE_mev=dE_mev,
+                expo=expo,
+                omega=omega,
+                mask2d=fit_mask_2d,
+                model_counts_bkg=comp_counts_dict[name],
+            )
+            curves2.append((name, E2_comp))
+        _mean_dnde, E2_tot = mean_E2_dnde_background(
             Ectr_mev=Ectr_mev,
             dE_mev=dE_mev,
             expo=expo,
             omega=omega,
             mask2d=fit_mask_2d,
-            model_counts_bkg=comp_counts_dict[name],
+            model_counts_bkg=model_counts_total,
         )
-        curves.append((name, E2_comp))
+        curves2.append(("total", E2_tot))
 
-    _mean_dnde, E2_tot = mean_E2_dnde_background(
-        Ectr_mev=Ectr_mev,
-        dE_mev=dE_mev,
-        expo=expo,
-        omega=omega,
-        mask2d=fit_mask_2d,
-        model_counts_bkg=model_counts_total,
-    )
-    curves.append(("total", E2_tot))
+        plot_E2_dnde_multi(
+            Ectr_mev,
+            curves2,
+            out_png=os.path.join(args.outdir, "E2_dnde_background_components_mcmc_fig2.png"),
+            title=f"MCMC background components ({args.mcmc_stat})",
+        )
 
-    plot_E2_dnde_multi(
-        Ectr_mev,
-        curves,
-        out_png=os.path.join(args.outdir, "E2_dnde_background_components.png"),
-        title=f"Fitted background components ({args.fit_mode}, cell={args.cell_deg:g} deg)",
-    )
+        # Fig3: exclude disk in the *plot*, keep same fit
+        plot_mask2d = fit_mask_2d & (np.abs(lat) >= float(args.disk_cut))
+        curves3 = []
+        for name in bkg_names:
+            _mean_dnde, E2_comp = mean_E2_dnde_background(
+                Ectr_mev=Ectr_mev,
+                dE_mev=dE_mev,
+                expo=expo,
+                omega=omega,
+                mask2d=plot_mask2d,
+                model_counts_bkg=comp_counts_dict[name],
+            )
+            curves3.append((name, E2_comp))
+        _mean_dnde, E2_tot3 = mean_E2_dnde_background(
+            Ectr_mev=Ectr_mev,
+            dE_mev=dE_mev,
+            expo=expo,
+            omega=omega,
+            mask2d=plot_mask2d,
+            model_counts_bkg=model_counts_total,
+        )
+        curves3.append(("total", E2_tot3))
+
+        plot_E2_dnde_multi(
+            Ectr_mev,
+            curves3,
+            out_png=os.path.join(args.outdir, "E2_dnde_background_components_mcmc_fig3.png"),
+            title=f"MCMC background components ({args.mcmc_stat}), |b|>={float(args.disk_cut):g} deg",
+        )
+
+    else:
+        component_order = list(templates_counts.keys())
+        res_fit = fit_cellwise_poisson_mle_counts(
+            counts=counts,
+            templates=templates_counts,
+            mask3d=fit_mask3d,
+            lon=lon,
+            lat=lat,
+            roi_lon=float(args.roi_lon),
+            roi_lat=float(args.roi_lat),
+            cell_deg=float(args.cell_deg),
+            component_order=component_order,
+            nonneg=True,
+        )
+
+        comp_counts_dict, model_counts_total = component_counts_from_cellwise_fit(
+            templates_counts=templates_counts,
+            res_fit=res_fit,
+            mask3d=fit_mask3d,
+        )
+        resid_counts = np.asarray(counts, float).copy()
+        resid_counts[~fit_mask3d] = np.nan
+        resid_counts = resid_counts - model_counts_total
+
+        bkg_names = component_order
+
+        # 5) plot each fitted component separately (in counts units -> mean dN/dE)
+        curves = []
+        for name in bkg_names:
+            _mean_dnde, E2_comp = mean_E2_dnde_background(
+                Ectr_mev=Ectr_mev,
+                dE_mev=dE_mev,
+                expo=expo,
+                omega=omega,
+                mask2d=fit_mask_2d,
+                model_counts_bkg=comp_counts_dict[name],
+            )
+            curves.append((name, E2_comp))
+
+        _mean_dnde, E2_tot = mean_E2_dnde_background(
+            Ectr_mev=Ectr_mev,
+            dE_mev=dE_mev,
+            expo=expo,
+            omega=omega,
+            mask2d=fit_mask_2d,
+            model_counts_bkg=model_counts_total,
+        )
+        curves.append(("total", E2_tot))
+
+        plot_E2_dnde_multi(
+            Ectr_mev,
+            curves,
+            out_png=os.path.join(args.outdir, "E2_dnde_background_components.png"),
+            title=f"Fitted background components ({args.fit_mode}, cell={args.cell_deg:g} deg)",
+        )
 
 
 

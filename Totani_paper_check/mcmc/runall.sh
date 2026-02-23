@@ -1,0 +1,12 @@
+python run_mcmc.py --energy-bin 1 --nwalkers 16 --nsteps 300 --burn 50 --thin 1
+python run_mcmc.py --energy-bin 3 --nwalkers 16 --nsteps 300 --burn 50 --thin 1
+python run_mcmc.py --energy-bin 4 --nwalkers 16 --nsteps 300 --burn 50 --thin 1
+python run_mcmc.py --energy-bin 5 --nwalkers 16 --nsteps 300 --burn 50 --thin 1
+python run_mcmc.py --energy-bin 6 --nwalkers 16 --nsteps 300 --burn 50 --thin 1
+python run_mcmc.py --energy-bin 7 --nwalkers 16 --nsteps 300 --burn 50 --thin 1
+python run_mcmc.py --energy-bin 8 --nwalkers 16 --nsteps 300 --burn 50 --thin 1
+python run_mcmc.py --energy-bin 9 --nwalkers 16 --nsteps 300 --burn 50 --thin 1
+python run_mcmc.py --energy-bin 10 --nwalkers 16 --nsteps 300 --burn 50 --thin 1
+python run_mcmc.py --energy-bin 11 --nwalkers 16 --nsteps 300 --burn 50 --thin 1
+python run_mcmc.py --energy-bin 12 --nwalkers 16 --nsteps 300 --burn 50 --thin 1
+python run_mcmc.py --energy-bin 13 --nwalkers 16 --nsteps 300 --burn 50 --thin 1
