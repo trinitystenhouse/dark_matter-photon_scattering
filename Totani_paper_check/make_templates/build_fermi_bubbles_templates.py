@@ -744,7 +744,8 @@ def build_bubbles_templates(
         flat_mask = make_flat_bubbles_mask(lon_deg, lat_deg, **flat_mask_kwargs)
 
     # 2) convert flat mask -> counts template at E*
-    mu_flat = flat_template_counts_from_mask(flat_mask, expo_2d, omega_2d, dE_mev)
+    I0 = 1e-7
+    mu_flat = flat_template_counts_from_mask(flat_mask, expo_2d, omega_2d, dE_mev) * I0
 
     # 3) fit: {other templates + flat bubbles}
     templates = dict(other_templates_counts)

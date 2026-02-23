@@ -277,3 +277,137 @@ def load_mu_templates_from_fits(
                 raise ValueError(f"Shape mismatch: '{labels[0]}' {s0} vs '{lab}' {s}")
 
     return mu_list, headers
+
+from scipy.optimize import minimize
+from scipy.optimize import nnls
+import numpy as np
+
+def fit_global_poisson_mle_counts(*, counts, templates, mask3d, nonneg=True, tiny=1e-30, maxiter=200, init="nnls",
+                                  ridge=None):
+    # templates: dict name->(nE,ny,nx) or list
+    if isinstance(templates, dict):
+        labels = list(templates.keys())
+        tpl_list = [np.asarray(templates[k], float) for k in labels]
+    else:
+        tpl_list = [np.asarray(t, float) for t in templates]
+        labels = [f"comp{j}" for j in range(len(tpl_list))]
+
+    nE = counts.shape[0]
+    nComp = len(tpl_list)
+    coeff = np.zeros((nE, nComp), float)
+    success = np.zeros(nE, bool)
+
+    bounds = [(0.0, None)] * nComp if nonneg else [(None, None)] * nComp
+
+    # optional ridge dict: {j: lam}
+    ridge = ridge or {}
+
+    for k in range(nE):
+        m = mask3d[k]
+        if not np.any(m):
+            continue
+        y = counts[k][m].ravel().astype(float)
+        X = np.stack([tpl_list[j][k][m].ravel().astype(float) for j in range(nComp)], axis=1)
+
+        good = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
+        y, X = y[good], X[good]
+        if y.size == 0:
+            continue
+
+        # L2 column scaling for numerical stability (matches cellwise fit)
+        s = np.sqrt(np.sum(X * X, axis=0))
+        s = np.maximum(s, tiny)
+        X_scaled = X / s[None, :]
+
+        # init in scaled space
+        if init == "nnls" and nonneg:
+            a0_scaled, _ = nnls(X_scaled, y)
+        else:
+            a0_scaled = np.full(nComp, 1e-3, float)
+
+        # Optimize in scaled parameter space: a = a_scaled / s
+        def fun(a_scaled):
+            mu = np.clip(X_scaled @ a_scaled, tiny, None)
+            nll = np.sum(mu - y*np.log(mu))
+            # ridge on scaled params
+            for j, lam in ridge.items():
+                nll += 0.5 * lam * a_scaled[j] * a_scaled[j]
+            return nll
+
+        def jac(a_scaled):
+            mu = np.clip(X_scaled @ a_scaled, tiny, None)
+            r = 1.0 - (y/mu)
+            g = X_scaled.T @ r
+            for j, lam in ridge.items():
+                g[j] += lam * a_scaled[j]
+            return g
+
+        opt = minimize(fun, a0_scaled, jac=jac, bounds=bounds, method="L-BFGS-B",
+                       options={"maxiter": int(maxiter)})
+        
+        # Unscale back to original template units
+        a_scaled = opt.x
+        coeff[k] = a_scaled / s
+        success[k] = opt.success
+
+    return {"coeff": coeff, "labels": labels, "success": success}
+
+import numpy as np
+
+def predict_counts_maps_global(*, aG, mu_list, mask3d):
+    """
+    aG: (nE, nComp) global coeffs
+    mu_list: list of (nE,ny,nx) counts templates
+    mask3d: bool (nE,ny,nx) keep mask defining region+coverage
+
+    Returns:
+      pred_comp: (nComp,nE) predicted total counts in region
+      pred_model:(nE,) total predicted counts in region
+    """
+    nE = mask3d.shape[0]
+    nComp = len(mu_list)
+    pred_comp = np.zeros((nComp, nE), float)
+    pred_model = np.zeros(nE, float)
+
+    for k in range(nE):
+        m = mask3d[k]
+        if not np.any(m):
+            continue
+        tot = 0.0
+        for j in range(nComp):
+            mu = np.asarray(mu_list[j][k], float)
+            s = float(np.nansum(mu[m]))
+            c = float(aG[k, j]) * s
+            pred_comp[j, k] = c
+            tot += c
+        pred_model[k] = tot
+    return pred_comp, pred_model
+
+def E2_from_pred_counts_maps(*, pred_counts_map, expo, omega, dE_mev, Ectr_mev, mask2d, tiny=1e-30):
+    """
+    pred_counts_map: (nE,ny,nx) predicted counts map for ONE component (or model sum)
+    mask2d: (ny,nx) region mask (geometric), but we also require finite expo per bin.
+    Returns: (E2, ) array length nE in MeV cm^-2 s^-1 sr^-1
+    """
+    nE = pred_counts_map.shape[0]
+    E2 = np.full(nE, np.nan, float)
+
+    for k in range(nE):
+        m = mask2d & np.isfinite(expo[k]) & (expo[k] > 0)
+        if not np.any(m):
+            continue
+
+        Omega_reg = float(np.nansum(omega[m]))
+        if not np.isfinite(Omega_reg) or Omega_reg <= 0:
+            continue
+
+        denom = expo[k][m] * dE_mev[k]
+        good = np.isfinite(denom) & (denom > tiny) & np.isfinite(pred_counts_map[k][m])
+        if not np.any(good):
+            continue
+
+        N = pred_counts_map[k][m][good]
+        denom = denom[good]
+        I_mean = float(np.nansum(N / denom) / Omega_reg)   # ph cm^-2 s^-1 sr^-1 MeV^-1
+        E2[k] = I_mean * (Ectr_mev[k] ** 2)
+    return E2

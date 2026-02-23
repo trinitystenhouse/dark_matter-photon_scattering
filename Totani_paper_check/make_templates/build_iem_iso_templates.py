@@ -209,6 +209,15 @@ def main():
     mu_iem = iem_dnde * expo * omega[None, :, :] * dE[:, None, None]
     mu_iso = iso_dnde * expo * omega[None, :, :] * dE[:, None, None]
 
+    k = 2  # ~3.8 GeV in your binning
+    conv_k = expo[k] * omega * dE[k]
+
+    print("Ectr(MeV) =", Ectr[k])
+    print("I_ctr =", I_ctr[k], " [from iso file]")
+    print("conv median =", np.nanmedian(conv_k))
+    print("mu_iso median expected =", np.nanmedian(I_ctr[k] * conv_k))
+    print("mu_iso sum expected =", np.nansum(I_ctr[k] * conv_k))
+
     # Write
     write_cube(os.path.join(args.outdir, "iem_dnde.fits"), iem_dnde, hdr_cnt,
                bunit="ph cm-2 s-1 sr-1 MeV-1")

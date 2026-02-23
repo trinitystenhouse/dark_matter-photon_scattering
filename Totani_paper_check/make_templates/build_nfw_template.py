@@ -317,11 +317,11 @@ def main():
         J = J / Jpole
 
     # For fitting stability: normalise spatial template to mean=1 within ROI
-    # vals = J[roi]
-    # vals = vals[np.isfinite(vals) & (vals > 0)]
-    # if vals.size == 0:
-    #     raise RuntimeError("NFW template is zero in ROI after masking.")
-    # J = J / np.mean(vals)
+    vals = J[roi]
+    vals = vals[np.isfinite(vals) & (vals > 0)]
+    if vals.size == 0:
+        raise RuntimeError("NFW template is zero in ROI after masking.")
+    J = J / np.mean(vals)
 
     nfw_spatial = J.astype(np.float64)
 
@@ -333,9 +333,10 @@ def main():
 
 
     # --- COUNTS TEMPLATE (this is what your mu_list expects) ---
+    I0 = 1e-7
     # denom here is the factor that converts flux -> counts
     conv = expo * omega[None, :, :] * dE_mev[:, None, None]   # shape (nE,ny,nx)
-    mu_nfw = nfw_spatial[None, :, :] * conv                   # shape (nE,ny,nx)
+    mu_nfw = nfw_spatial[None, :, :] * conv  * I0                 # shape (nE,ny,nx)
 
     nfw_dnde = np.full_like(mu_nfw, np.nan, dtype=np.float64)
     ok = np.isfinite(conv) & (conv > 0)

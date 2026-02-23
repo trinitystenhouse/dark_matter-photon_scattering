@@ -92,6 +92,8 @@ def main():
         default=os.path.join(DATA_DIR, "processed", "templates"),
     )
 
+    ap.add_argument("--debug", action="store_true")
+
     ap.add_argument("--binsz", type=float, default=0.125)
     ap.add_argument("--roi-lon", type=float, default=60.0)
     ap.add_argument("--roi-lat", type=float, default=60.0)
@@ -131,6 +133,15 @@ def main():
 
     # --- ROI mask ---
     roi2d = (np.abs(lon) <= args.roi_lon) & (np.abs(lat) <= args.roi_lat)
+
+    print("[units debug] omega median:", np.nanmedian(omega[roi2d]))
+    print("[units debug] dE_mev min/median/max:", np.min(dE_mev), np.median(dE_mev), np.max(dE_mev))
+
+    k = 2
+    print("[units debug] expo median (k=2):", np.nanmedian(expo[k][roi2d]))
+    conv = expo[k] * omega * dE_mev[k]
+    print("[units debug] conv median (k=2):", np.nanmedian(conv[roi2d]))
+
 
     shell1 = shell_chord_length(
         lon,
@@ -181,13 +192,59 @@ def main():
     if vals.size == 0:
         raise RuntimeError("Loop I template has no positive pixels in fit mask")
 
+    if args.debug:
+        fit_vals_all = T[fit2d]
+        fit_vals_all = fit_vals_all[np.isfinite(fit_vals_all)]
+        print("[LoopI debug] Pre-normalization morphology stats")
+        print(f"  T (all):  min={np.nanmin(T):.6g} max={np.nanmax(T):.6g} sum={np.nansum(T):.6g}")
+        if fit_vals_all.size:
+            print(
+                "  T (fit mask):"
+                f" min={np.nanmin(fit_vals_all):.6g} max={np.nanmax(fit_vals_all):.6g}"
+                f" mean={np.nanmean(fit_vals_all):.6g} sum={np.nansum(fit_vals_all):.6g}"
+            )
+        print(
+            "  T (fit mask, positive only):"
+            f" min={np.nanmin(vals):.6g} max={np.nanmax(vals):.6g}"
+            f" mean={np.nanmean(vals):.6g} sum={np.nansum(vals):.6g} n={vals.size}"
+        )
+
     T_norm = T / np.mean(vals)   # mean=1 in fit region (recommended)
+
+    if args.debug:
+        fit_vals_norm = T_norm[fit2d]
+        fit_vals_norm = fit_vals_norm[np.isfinite(fit_vals_norm)]
+        print("[LoopI debug] Post-normalization morphology stats")
+        print(
+            f"  T_norm (all):  min={np.nanmin(T_norm):.6g} max={np.nanmax(T_norm):.6g} sum={np.nansum(T_norm):.6g}"
+        )
+        if fit_vals_norm.size:
+            print(
+                "  T_norm (fit mask):"
+                f" min={np.nanmin(fit_vals_norm):.6g} max={np.nanmax(fit_vals_norm):.6g}"
+                f" mean={np.nanmean(fit_vals_norm):.6g} sum={np.nansum(fit_vals_norm):.6g}"
+            )
 
     # --- PHENO (Totani-style): energy-independent morphology replicated ---
     loopI_dnde = np.broadcast_to(T_norm[None, :, :], (nE, ny, nx)).astype(float).copy()
 
     # Convert shape -> counts template
-    mu_loopI = loopI_dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
+    I0 = 1e-7
+    mu_loopI = loopI_dnde * expo * omega[None, :, :] * dE_mev[:, None, None] * I0
+
+    if args.debug:
+        mu_vals = mu_loopI[:, fit2d]
+        mu_vals = mu_vals[np.isfinite(mu_vals)]
+        print("[LoopI debug] Counts-template stats")
+        print(
+            f"  mu_loopI: min={np.nanmin(mu_loopI):.6g} max={np.nanmax(mu_loopI):.6g} sum={np.nansum(mu_loopI):.6g}"
+        )
+        if mu_vals.size:
+            print(
+                "  mu_loopI (fit mask over all E):"
+                f" min={np.nanmin(mu_vals):.6g} max={np.nanmax(mu_vals):.6g}"
+                f" mean={np.nanmean(mu_vals):.6g} sum={np.nansum(mu_vals):.6g}"
+            )
 
     # Optional diagnostic products (shape only)
     loopI_E2dnde = loopI_dnde * (Ectr_mev[:, None, None] ** 2)
