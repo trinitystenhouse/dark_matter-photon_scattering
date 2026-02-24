@@ -132,7 +132,6 @@ def totani_init_from_mu_counts(
 
     return f0
 
-
 def totani_mcmc_fit(
     *,
     Cobs: np.ndarray,
@@ -174,21 +173,60 @@ def totani_mcmc_fit(
         ll = loglike_poisson_counts(Cobs, Cexp)
         return lp + ll
 
-    # ---- initialize walkers near f_init, respecting bounds
+    # -------------------------------------------------------------------------
+    # Initialize walkers near f_init, making sure each has finite logprob
+    # -------------------------------------------------------------------------
     p0 = np.zeros((nwalkers, ncomp), dtype=float)
     scale = init_jitter_frac * (np.abs(f_init) + 1.0)
 
     for w in range(nwalkers):
         trial = f_init + rng.normal(0.0, scale, size=ncomp)
 
-        for _ in range(100):
+        # Try a bunch of times to get a finite logprob start
+        for _ in range(200):
+            # Enforce bounds by repairing any offending dimensions
             ok = True
             for j, (lo, hi) in enumerate(bounds):
                 x = trial[j]
-                if (x < lo) or (x > hi) or (not np.isfinite(x)):
+                if (not np.isfinite(x)) or (x < lo) or (x > hi):
                     ok = False
                     x = f_init[j] + rng.normal(0.0, scale[j])
-                    # if lower-bounded at 0, keep non-negative
+                    if np.isfinite(lo) and lo >= 0.0:
+                        x = max(lo, abs(x))
+                    if np.isfinite(hi):
+                        x = min(hi, x)
+                    trial[j] = x
+
+            if ok and np.isfinite(logprob_fn(trial)):
+                break
+
+            # otherwise, resample entire vector (helps if Cexp<=0 issues)
+            trial = f_init + rng.normal(0.0, scale, size=ncomp)
+
+        p0[w, :] = trial
+
+    # -------------------------------------------------------------------------
+    # Diagnose + respawn any remaining invalid walkers
+    # -------------------------------------------------------------------------
+    lp0 = np.array([logprob_fn(p0[w]) for w in range(nwalkers)], dtype=float)
+    good = np.isfinite(lp0)
+    if good.sum() < max(2, ncomp + 1):
+        raise RuntimeError(f"Too few valid initial walkers: {good.sum()}/{nwalkers}")
+
+    bad_idx = np.where(~good)[0]
+    good_idx = np.where(good)[0]
+    for w in bad_idx:
+        src = rng.choice(good_idx)
+        # tiny jitter around a valid walker, then repair bounds if needed
+        trial = p0[src] + rng.normal(0.0, 1e-4 * (np.abs(p0[src]) + 1.0), size=ncomp)
+
+        for _ in range(200):
+            ok = True
+            for j, (lo, hi) in enumerate(bounds):
+                x = trial[j]
+                if (not np.isfinite(x)) or (x < lo) or (x > hi):
+                    ok = False
+                    x = p0[src, j] + rng.normal(0.0, 1e-4 * (abs(p0[src, j]) + 1.0))
                     if np.isfinite(lo) and lo >= 0.0:
                         x = max(lo, abs(x))
                     if np.isfinite(hi):
@@ -196,16 +234,44 @@ def totani_mcmc_fit(
                     trial[j] = x
             if ok and np.isfinite(logprob_fn(trial)):
                 break
+            trial = p0[src] + rng.normal(0.0, 1e-4 * (np.abs(p0[src]) + 1.0), size=ncomp)
 
-        p0[w, :] = trial
+        p0[w] = trial
 
+    # Final check
+    lp0 = np.array([logprob_fn(p0[w]) for w in range(nwalkers)], dtype=float)
+    n_bad = int(np.sum(~np.isfinite(lp0)))
+    print(f"Init walkers finite: {nwalkers - n_bad}/{nwalkers}  (respawned {len(bad_idx)})")
+    if n_bad:
+        # It's safer to fail than to run with dead walkers.
+        raise RuntimeError(f"{n_bad} walkers still have -inf logprob after respawn; check bounds/Cexp positivity.")
+
+    # -------------------------------------------------------------------------
+    # Run sampler
+    # -------------------------------------------------------------------------
     used_emcee = False
     try:
         import emcee  # type: ignore
-
         used_emcee = True
         sampler = emcee.EnsembleSampler(nwalkers, ncomp, logprob_fn)
         sampler.run_mcmc(p0, nsteps, progress=progress)
+        try:
+            tau = sampler.get_autocorr_time(tol=0)
+            print("tau:", tau)
+            n_over_tau = nsteps / tau
+            print("N/tau:", n_over_tau)
+            # Totani-style rule of thumb: require sufficiently many autocorrelation times.
+            # Enforce N/tau >= 50 for all parameters.
+            if np.any(~np.isfinite(n_over_tau)):
+                raise RuntimeError(f"Non-finite N/tau encountered: {n_over_tau}")
+            if np.any(n_over_tau < 50.0):
+                bad = np.where(n_over_tau < 50.0)[0].tolist()
+                raise RuntimeError(
+                    f"Autocorr convergence check failed: N/tau < 50 for parameter indices {bad}. "
+                    f"Min N/tau={float(np.min(n_over_tau)):.3f}. Increase nsteps."
+                )
+        except Exception as e:
+            print("autocorr time not available yet:", repr(e))
         chain = sampler.get_chain()
         logprob = sampler.get_log_prob()
         acc = sampler.acceptance_fraction
@@ -237,6 +303,9 @@ def totani_mcmc_fit(
 
         acc /= float(nsteps)
 
+    # -------------------------------------------------------------------------
+    # Summarize posterior
+    # -------------------------------------------------------------------------
     if burn >= nsteps:
         raise ValueError("burn must be < nsteps.")
 

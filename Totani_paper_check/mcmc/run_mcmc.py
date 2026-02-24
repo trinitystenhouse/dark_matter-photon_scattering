@@ -39,6 +39,46 @@ def build_roi_box_mask(lon, lat, roi_lon=60.0, roi_lat=60.0):
     return (np.abs(lon) <= roi_lon) & (np.abs(lat) <= roi_lat)
 
 
+def build_cell_id_map(*, lon, lat, roi_lon=60.0, roi_lat=60.0, cell_deg=10.0):
+    lon = np.asarray(lon, float)
+    lat = np.asarray(lat, float)
+    ny, nx = lon.shape
+
+    nlon = int(round((2.0 * float(roi_lon)) / float(cell_deg)))
+    nlat = int(round((2.0 * float(roi_lat)) / float(cell_deg)))
+    if nlon != 12 or nlat != 12:
+        raise ValueError(f"Expected 12x12 cells for roi_lon=roi_lat=60 and cell_deg=10, got {nlon}x{nlat}.")
+
+    in_roi = (np.abs(lon) <= float(roi_lon)) & (np.abs(lat) <= float(roi_lat))
+    cell_id = np.full((ny, nx), -1, dtype=int)
+
+    # Map lon/lat to cell indices in [0..11]
+    ix = np.floor((lon + float(roi_lon)) / float(cell_deg)).astype(int)
+    iy = np.floor((lat + float(roi_lat)) / float(cell_deg)).astype(int)
+    ix = np.clip(ix, 0, nlon - 1)
+    iy = np.clip(iy, 0, nlat - 1)
+
+    cell_id[in_roi] = iy[in_roi] * nlon + ix[in_roi]
+    return cell_id
+
+
+def aggregate_to_cells(*, x2d, mask2d, cell_id_map, ncells=144):
+    x2d = np.asarray(x2d, float)
+    mask2d = np.asarray(mask2d, bool)
+    cell_id_map = np.asarray(cell_id_map, int)
+
+    if x2d.shape != mask2d.shape or x2d.shape != cell_id_map.shape:
+        raise ValueError("x2d, mask2d, and cell_id_map must have the same 2D shape")
+
+    valid = mask2d & (cell_id_map >= 0) & np.isfinite(x2d)
+    cid = cell_id_map[valid].ravel()
+    w = x2d[valid].ravel()
+
+    x_cells = np.bincount(cid, weights=w, minlength=int(ncells)).astype(float)
+    npix_cells = np.bincount(cid, weights=np.ones_like(w), minlength=int(ncells)).astype(int)
+    return x_cells, npix_cells
+
+
 # -----------------------------------------------------------------------------
 # Totani-style init for YOUR parameterisation (mu are counts-space templates)
 # -----------------------------------------------------------------------------
@@ -244,6 +284,14 @@ def main():
     )
     ap.add_argument("--roi-lon", type=float, default=60.0)
     ap.add_argument("--roi-lat", type=float, default=60.0)
+    ap.add_argument(
+        "--exclude-disk",
+        default=False,
+        action=argparse.BooleanOptionalAction,
+        help="Exclude |b|<disk_cut from the ROI. Default is to include the disk in the fit.",
+    )
+    ap.add_argument("--disk-cut", type=float, default=10.0, help="Disk cut in degrees used when --exclude-disk is enabled")
+    ap.add_argument("--cell-deg", type=float, default=10.0, help="Cell size in degrees (Totani uses 10°)")
     ap.add_argument("--binsz", type=float, default=0.125)
     ap.add_argument("--energy-bin", type=int, default=2, help="Energy bin index to fit (0-based)")
     ap.add_argument("--nwalkers", type=int, default=64)
@@ -265,7 +313,8 @@ def main():
         "iso",
         "ps",
         "nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno",
-        "loopI",
+        "loopA",
+        "loopB",
         "ics",
         "fb_flat",
     ]
@@ -305,12 +354,25 @@ def main():
     # ---- Lon/lat and ROI
     lon, lat = lonlat_grids(wcs, ny, nx)
     roi2d = build_roi_box_mask(lon, lat, args.roi_lon, args.roi_lat)
-    print(f"  ROI: |l|<={args.roi_lon}°, |b|<={args.roi_lat}°  (pixels {roi2d.sum()}/{roi2d.size})")
+    if args.exclude_disk:
+        roi2d = roi2d & (np.abs(lat) >= float(args.disk_cut))
+    disk_tag = f"excluded |b|<{float(args.disk_cut):g}°" if args.exclude_disk else "disk included"
+    print(f"  ROI: |l|<={args.roi_lon}°, |b|<={args.roi_lat}° ({disk_tag})  (pixels {roi2d.sum()}/{roi2d.size})")
+
+    # ---- Cell IDs for Totani-style cellwise likelihood
+    cell_id_map = build_cell_id_map(lon=lon, lat=lat, roi_lon=args.roi_lon, roi_lat=args.roi_lat, cell_deg=args.cell_deg)
 
     # ---- Optional extended-source keep mask
     srcmask = np.ones((nE, ny, nx), bool)
     if args.ext_mask is not None and os.path.exists(str(args.ext_mask)):
-        ext_keep3d = load_mask_any_shape(str(args.ext_mask), counts.shape)
+        try:
+            ext_keep3d = load_mask_any_shape(str(args.ext_mask), counts.shape)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to read --ext-mask as a FITS file: {args.ext_mask}. "
+                f"Original error: {e}. "
+                "If you want to run without an extended-source mask, pass --ext-mask '' (or a non-existent path)."
+            ) from e
         srcmask &= ext_keep3d
         frac_masked = float(np.mean((~ext_keep3d)[:, roi2d])) if np.any(roi2d) else float("nan")
         print(f"  Extended-source mask applied (masked frac in ROI={frac_masked:.4f})")
@@ -344,6 +406,18 @@ def main():
 
     print(f"\nFitting energy bin k={k}, E_ctr={Ectr_k:.1f} MeV ({Ectr_k/1000:.3f} GeV)")
     mask_k = fit_mask3d[k]
+
+    # Ensure we also exclude pixels where any template is non-finite in this bin.
+    # (build_fit_mask3d already enforces finite counts/expo and expo>0.)
+    tmpl_ok = np.ones((ny, nx), dtype=bool)
+    for j in range(len(labels)):
+        tmpl_ok &= np.isfinite(mu_list[j][k])
+    n_before = int(np.count_nonzero(mask_k))
+    mask_k = mask_k & tmpl_ok
+    n_after = int(np.count_nonzero(mask_k))
+    if n_after != n_before:
+        print(f"  Mask tightened by template finiteness: {n_before} -> {n_after} pixels")
+
     npix_k = int(mask_k.sum())
     print(f"  Valid pixels in fit mask: {npix_k}")
     if npix_k == 0:
@@ -363,21 +437,45 @@ def main():
         dE_mev=dE_k,
     )
 
-    # ---- Observed counts vector over masked pixels
-    Cobs = counts[k][mask_k].ravel().astype(float)
-    print(f"\n  Cobs: shape={Cobs.shape}, sum={Cobs.sum():.1f}, mean={Cobs.mean():.3f}")
+    # ---- Cellwise vectors for Totani-style likelihood
+    # Observed counts aggregated into 10°x10° cells
+    Cobs_cells, npix_cells = aggregate_to_cells(
+        x2d=counts[k],
+        mask2d=mask_k,
+        cell_id_map=cell_id_map,
+        ncells=144,
+    )
+    cell_keep = npix_cells > 0
+    print("\nCell occupancy (npix per cell):")
+    print(npix_cells.reshape(12, 12))
 
-    # ---- Build mu matrix in counts-space over masked pixels
+    Cobs = Cobs_cells[cell_keep].astype(float)
+    print(f"\n  Cobs_cells: shape={Cobs.shape}, sum={Cobs.sum():.1f}, mean={Cobs.mean():.3f}")
+
+    # Build mu_cells (ncomp, ncells_kept)
     ncomp = len(labels)
-    mu = np.zeros((ncomp, npix_k), dtype=float)
+    mu_cells_full = np.zeros((ncomp, 144), dtype=float)
     for j, lab in enumerate(labels):
-        mu[j, :] = mu_list[j][k][mask_k].ravel().astype(float)
-        print(f"  mu[{lab}]: sum={mu[j,:].sum():.3e}, mean={mu[j,:].mean():.3e}")
+        mu_j_cells, _npix = aggregate_to_cells(
+            x2d=mu_list[j][k],
+            mask2d=mask_k,
+            cell_id_map=cell_id_map,
+            ncells=144,
+        )
+        mu_cells_full[j, :] = mu_j_cells
+        print(f"  mu_cells[{lab}]: sum={mu_j_cells.sum():.3e}")
 
-    # ---- denom vector for isotropic conversion (same pixels)
-    denom_vec = (expo[k][mask_k].ravel().astype(float) *
-                 omega[mask_k].ravel().astype(float) *
-                 dE_k)
+    mu = mu_cells_full[:, cell_keep].astype(float)
+
+    # denom_cells for isotropic conversion (and sanity)
+    denom_map = expo[k] * omega * dE_k
+    denom_cells, _npix = aggregate_to_cells(
+        x2d=denom_map,
+        mask2d=mask_k,
+        cell_id_map=cell_id_map,
+        ncells=144,
+    )
+    denom_vec = denom_cells[cell_keep].astype(float)
 
     # ---- Initialize parameters (THIS is the critical change)
     print("\nInitializing MCMC (Totani-style, consistent with your mu counts templates)...")
@@ -426,9 +524,12 @@ def main():
         nsteps=args.nsteps,
         burn=args.burn,
         thin=args.thin,
+        init_jitter_frac=1e-3
     )
     dt = time.time() - t0
     print(f"MCMC wall time: {dt:.2f} s  ({dt/60:.2f} min)")
+    print("acc per walker:", res.acceptance_fraction)
+    print("n dead:", np.sum(res.acceptance_fraction < 0.02))
 
     print("\n" + "=" * 60)
     print("MCMC Results")
