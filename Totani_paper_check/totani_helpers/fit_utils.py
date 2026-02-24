@@ -281,9 +281,34 @@ def load_mu_templates_from_fits(
 from scipy.optimize import minimize
 from scipy.optimize import nnls
 import numpy as np
+import numpy as np
+from scipy.optimize import minimize, nnls
 
-def fit_global_poisson_mle_counts(*, counts, templates, mask3d, nonneg=True, tiny=1e-30, maxiter=200, init="nnls",
-                                  ridge=None):
+def fit_global_poisson_mle_counts(
+    *,
+    counts,
+    templates,
+    mask3d,
+    nonneg=True,
+    tiny=1e-30,
+    maxiter=200,
+    init="nnls",                 # "nnls", "lsq", "ones", "totani"
+    ridge=None,                  # dict: {label_or_index: lam} (applied in scaled space)
+    column_scale="l2",           # "l2", "l1", "max", or None
+    drop_tol=0.0,                # drop columns with scale <= drop_tol
+    # Totani-like sign rules:
+    free_sign_labels=("fb_neg",),
+    free_sign_substrings=("nfw", "halo"),   # halo components can be negative
+):
+    """
+    Global (ROI-wide), per-energy-bin Poisson MLE in counts-space.
+
+    Totani-like bounds:
+      - Known components constrained >=0 when nonneg=True
+      - Components in free_sign_labels OR containing any of free_sign_substrings are free-sign.
+        (e.g. halo templates "nfw..." and negative residual "fb_neg")
+    """
+
     # templates: dict name->(nE,ny,nx) or list
     if isinstance(templates, dict):
         labels = list(templates.keys())
@@ -294,65 +319,169 @@ def fit_global_poisson_mle_counts(*, counts, templates, mask3d, nonneg=True, tin
 
     nE = counts.shape[0]
     nComp = len(tpl_list)
+
     coeff = np.zeros((nE, nComp), float)
     success = np.zeros(nE, bool)
+    messages = np.empty(nE, dtype=object)
+    nll_vals = np.full(nE, np.nan, float)
 
-    bounds = [(0.0, None)] * nComp if nonneg else [(None, None)] * nComp
+    # --- determine free-sign component indices ---
+    free_sign_labels = set(free_sign_labels or ())
+    free_sign_substrings = tuple(s.lower() for s in (free_sign_substrings or ()))
+    free_sign_idx = set()
+    for j, lab in enumerate(labels):
+        lab_l = str(lab).lower()
+        if (lab in free_sign_labels) or any(ss in lab_l for ss in free_sign_substrings):
+            free_sign_idx.add(j)
 
-    # optional ridge dict: {j: lam}
+    # optional ridge dict: accept keys as indices or labels
     ridge = ridge or {}
+    ridge_idx = {}
+    for key, lam in ridge.items():
+        if lam is None or lam == 0:
+            continue
+        if isinstance(key, int):
+            ridge_idx[int(key)] = float(lam)
+        else:
+            # key assumed label
+            if key in labels:
+                ridge_idx[labels.index(key)] = float(lam)
+
+    def _col_scale(X):
+        if column_scale is None:
+            s = np.ones(X.shape[1], dtype=float)
+        elif column_scale == "l2":
+            s = np.sqrt(np.sum(X * X, axis=0))
+        elif column_scale == "l1":
+            s = np.sum(np.abs(X), axis=0)
+        elif column_scale == "max":
+            s = np.max(np.abs(X), axis=0)
+        else:
+            raise ValueError("column_scale must be one of: None, 'l2', 'l1', 'max'")
+        return np.maximum(s, 0.0)
 
     for k in range(nE):
         m = mask3d[k]
         if not np.any(m):
+            messages[k] = "empty mask"
             continue
+
         y = counts[k][m].ravel().astype(float)
         X = np.stack([tpl_list[j][k][m].ravel().astype(float) for j in range(nComp)], axis=1)
 
         good = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
         y, X = y[good], X[good]
         if y.size == 0:
+            messages[k] = "no finite pixels"
             continue
 
-        # L2 column scaling for numerical stability (matches cellwise fit)
-        s = np.sqrt(np.sum(X * X, axis=0))
-        s = np.maximum(s, tiny)
-        X_scaled = X / s[None, :]
+        # --- column scaling (global per bin) ---
+        s = _col_scale(X)
+        active = s > drop_tol
+        if not np.any(active):
+            messages[k] = "all templates dropped by scale"
+            continue
+
+        X_a = X[:, active]
+        s_a = s[active]
+        active_idx = np.where(active)[0]
+        X_scaled = X_a / np.maximum(s_a[None, :], tiny)
+
+        # bounds in scaled space (Totani-like per component)
+        bounds_a = []
+        for j_full in active_idx:
+            if nonneg and (j_full not in free_sign_idx):
+                bounds_a.append((0.0, None))     # known components
+            else:
+                bounds_a.append((None, None))    # halo + fb_neg (free sign)
 
         # init in scaled space
-        if init == "nnls" and nonneg:
-            a0_scaled, _ = nnls(X_scaled, y)
+        if init == "totani":
+            # known components start at ~1, unknown/halo start at 0 (in ORIGINAL space)
+            a0 = np.zeros(len(active_idx), float)
+            for ii, j_full in enumerate(active_idx):
+                lab_l = labels[j_full].lower()
+                if ("ps" == lab_l) or ("point" in lab_l and "source" in lab_l):
+                    a0[ii] = 1.0
+                elif ("gas" in lab_l) or ("pi0" in lab_l) or ("brem" in lab_l) or ("ics" in lab_l) or ("iem" in lab_l) or ("galprop" in lab_l):
+                    a0[ii] = 1.0
+                elif lab_l in ("iso", "isotropic"):
+                    a0[ii] = 1.0
+                elif ("loop" in lab_l):
+                    a0[ii] = 1.0
+                else:
+                    a0[ii] = 0.0
+            a0_scaled = a0 * s_a
+        elif init == "lsq":
+            a, *_ = np.linalg.lstsq(X_scaled, y, rcond=None)
+            if nonneg:
+                a = a.copy()
+                for ii, j_full in enumerate(active_idx):
+                    if j_full not in free_sign_idx:
+                        a[ii] = max(a[ii], 0.0)
+            a0_scaled = a
+        elif init == "ones":
+            a0_scaled = np.full(len(active_idx), max(np.sum(y) / max(len(active_idx), 1), 1.0), float)
         else:
-            a0_scaled = np.full(nComp, 1e-3, float)
+            # nnls only if all constrained nonneg
+            if init == "nnls" and nonneg and all(j_full not in free_sign_idx for j_full in active_idx):
+                a0_scaled, _ = nnls(X_scaled, y)
+            else:
+                a0_scaled = np.zeros(len(active_idx), float)
 
-        # Optimize in scaled parameter space: a = a_scaled / s
+        # Optimize in scaled parameter space: a = a_scaled / s_a
         def fun(a_scaled):
             mu = np.clip(X_scaled @ a_scaled, tiny, None)
-            nll = np.sum(mu - y*np.log(mu))
-            # ridge on scaled params
-            for j, lam in ridge.items():
-                nll += 0.5 * lam * a_scaled[j] * a_scaled[j]
+            nll = np.sum(mu - y * np.log(mu))
+            # ridge on scaled params (by ORIGINAL component index)
+            for j_full, lam in ridge_idx.items():
+                if not active[j_full]:
+                    continue
+                ii = int(np.where(active_idx == j_full)[0][0])
+                nll += 0.5 * lam * a_scaled[ii] * a_scaled[ii]
             return nll
 
         def jac(a_scaled):
             mu = np.clip(X_scaled @ a_scaled, tiny, None)
-            r = 1.0 - (y/mu)
+            r = 1.0 - (y / mu)
             g = X_scaled.T @ r
-            for j, lam in ridge.items():
-                g[j] += lam * a_scaled[j]
+            for j_full, lam in ridge_idx.items():
+                if not active[j_full]:
+                    continue
+                ii = int(np.where(active_idx == j_full)[0][0])
+                g[ii] += lam * a_scaled[ii]
             return g
 
-        opt = minimize(fun, a0_scaled, jac=jac, bounds=bounds, method="L-BFGS-B",
-                       options={"maxiter": int(maxiter)})
-        
-        # Unscale back to original template units
+        opt = minimize(
+            fun,
+            a0_scaled,
+            jac=jac,
+            bounds=bounds_a,
+            method="L-BFGS-B",
+            options={"maxiter": int(maxiter)},
+        )
+
+        # Unscale back to ORIGINAL template units
         a_scaled = opt.x
-        coeff[k] = a_scaled / s
-        success[k] = opt.success
+        a_active = a_scaled / np.maximum(s_a, tiny)
 
-    return {"coeff": coeff, "labels": labels, "success": success}
+        a_full = np.zeros(nComp, float)
+        a_full[active] = a_active
+        coeff[k] = a_full
+        success[k] = bool(opt.success)
+        messages[k] = str(opt.message)
+        nll_vals[k] = float(opt.fun)
 
-import numpy as np
+    return {
+        "coeff": coeff,
+        "labels": labels,
+        "success": success,
+        "message": messages,
+        "nll": nll_vals,
+        "free_sign_labels": list(free_sign_labels),
+        "free_sign_substrings": list(free_sign_substrings),
+    }
+
 
 def predict_counts_maps_global(*, aG, mu_list, mask3d):
     """
@@ -383,31 +512,47 @@ def predict_counts_maps_global(*, aG, mu_list, mask3d):
         pred_model[k] = tot
     return pred_comp, pred_model
 
-def E2_from_pred_counts_maps(*, pred_counts_map, expo, omega, dE_mev, Ectr_mev, mask2d, tiny=1e-30):
+def E2_from_pred_counts_maps(
+    *, pred_counts_map, expo, omega, dE_mev, Ectr_mev, mask2d, tiny=1e-30
+):
     """
-    pred_counts_map: (nE,ny,nx) predicted counts map for ONE component (or model sum)
-    mask2d: (ny,nx) region mask (geometric), but we also require finite expo per bin.
-    Returns: (E2, ) array length nE in MeV cm^-2 s^-1 sr^-1
+    pred_counts_map: (nE,ny,nx) predicted counts for ONE component (or sum)
+    Returns E2 dN/dE as ROI solid-angle-weighted mean intensity:
+      [MeV cm^-2 s^-1 sr^-1]
     """
+    pred_counts_map = np.asarray(pred_counts_map, float)
+    expo = np.asarray(expo, float)
+    omega = np.asarray(omega, float)
+    dE_mev = np.asarray(dE_mev, float)
+    Ectr_mev = np.asarray(Ectr_mev, float)
+
     nE = pred_counts_map.shape[0]
     E2 = np.full(nE, np.nan, float)
 
     for k in range(nE):
-        m = mask2d & np.isfinite(expo[k]) & (expo[k] > 0)
+        m = (
+            mask2d
+            & np.isfinite(expo[k]) & (expo[k] > 0)
+            & np.isfinite(omega) & (omega > 0)
+            & np.isfinite(pred_counts_map[k])
+        )
         if not np.any(m):
             continue
 
-        Omega_reg = float(np.nansum(omega[m]))
-        if not np.isfinite(Omega_reg) or Omega_reg <= 0:
-            continue
-
         denom = expo[k][m] * dE_mev[k]
-        good = np.isfinite(denom) & (denom > tiny) & np.isfinite(pred_counts_map[k][m])
+        good = np.isfinite(denom) & (denom > tiny)
         if not np.any(good):
             continue
 
         N = pred_counts_map[k][m][good]
         denom = denom[good]
-        I_mean = float(np.nansum(N / denom) / Omega_reg)   # ph cm^-2 s^-1 sr^-1 MeV^-1
+        omega_good = omega[m][good]
+
+        Omega_reg = float(np.sum(omega_good))
+        if not np.isfinite(Omega_reg) or Omega_reg <= 0:
+            continue
+
+        I_mean = float(np.sum(N / denom) / Omega_reg)  # ph cm^-2 s^-1 sr^-1 MeV^-1
         E2[k] = I_mean * (Ectr_mev[k] ** 2)
+
     return E2

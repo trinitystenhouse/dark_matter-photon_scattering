@@ -27,6 +27,9 @@ import numpy as np
 from scipy.optimize import minimize, nnls
 
 
+import numpy as np
+from scipy.optimize import minimize, nnls
+
 def fit_cellwise_poisson_mle_counts(
     *,
     counts,
@@ -41,25 +44,23 @@ def fit_cellwise_poisson_mle_counts(
     nonneg=True,
     tiny=1e-30,
     maxiter=200,
-    init="nnls",
-    column_scale="l2",     # NEW: "l2", "l1", "max", or None
-    drop_tol=0.0,          # NEW: drop templates with column scale <= drop_tol in that cell/bin
-    ridge=0.0,             # NEW: small >=0 regularisation on scaled params (e.g. 1e-6)
+    init="nnls",               # "nnls", "lsq", "ones", "totani"
+    column_scale="l2",         # "l2", "l1", "max", or None
+    drop_tol=0.0,
+    ridge=0.0,
+    # NEW: free-sign components (no lower bound)
+    free_sign_labels=("fb_neg",),
+    free_sign_substrings=("nfw", "halo"),
 ):
-    """Cell-wise, per-energy-bin Poisson MLE in counts-space, robust to template scaling.
-
-    counts: (nE, ny, nx) observed counts
-    templates: dict[str,(nE,ny,nx)] or list of arrays (expected counts templates; can be unnormalised)
-    mask3d: bool (nE, ny, nx) True = use pixel in fit
-
-    Returns
-    -------
-    dict with:
-      - cells: list[bool2d]
-      - coeff_cells: (nCells, nE, nComp) coefficients in ORIGINAL template units
-      - labels: list[str]
-      - info: dict(success, nll, message, dropped, scales)
     """
+    Cell-wise, per-energy-bin Poisson MLE in counts-space, robust to scaling.
+
+    Totani-like sign constraints:
+      - By default, all components are constrained >=0 when nonneg=True
+      - Components whose label is in free_sign_labels OR contains any substring in free_sign_substrings
+        are allowed free sign (lower bound None).
+    """
+
     counts = np.asarray(counts, dtype=float)
     mask3d = np.asarray(mask3d, dtype=bool)
     if counts.shape != mask3d.shape:
@@ -89,7 +90,7 @@ def fit_cellwise_poisson_mle_counts(
         if T.shape != counts.shape:
             raise ValueError(f"template '{labels[j]}' shape {T.shape} != counts shape {counts.shape}")
 
-    # User-provided helper
+    # cells
     cells = build_lonlat_cells(lon=lon, lat=lat, roi_lon=roi_lon, roi_lat=roi_lat, cell_deg=cell_deg)
     nCells = len(cells)
     nComp = len(tpl_list)
@@ -99,11 +100,17 @@ def fit_cellwise_poisson_mle_counts(
     nll_vals = np.full((nCells, nE), np.nan, dtype=float)
     messages = np.empty((nCells, nE), dtype=object)
 
-    # diagnostics
     dropped = np.zeros((nCells, nE, nComp), dtype=bool)
     scales_store = np.full((nCells, nE, nComp), np.nan, dtype=float)
 
-    bounds = [(0.0, None)] * nComp if nonneg else [(None, None)] * nComp
+    # --- determine which components are free-sign ---
+    free_sign_labels = set(free_sign_labels or ())
+    free_sign_substrings = tuple(s.lower() for s in (free_sign_substrings or ()))
+    free_sign_idx = set()
+    for j, lab in enumerate(labels):
+        lab_l = str(lab).lower()
+        if lab in free_sign_labels or any(ss in lab_l for ss in free_sign_substrings):
+            free_sign_idx.add(j)
 
     def _col_scale(X):
         if column_scale is None:
@@ -118,28 +125,60 @@ def fit_cellwise_poisson_mle_counts(
             raise ValueError("column_scale must be one of: None, 'l2', 'l1', 'max'")
         return np.maximum(s, 0.0)
 
-    def _initial_guess(y, X_scaled, active_idx):
-        """Return a0 for the active (non-dropped) parameters in SCALED space."""
+    def _initial_guess_scaled(y, X_scaled, active_idx, s_a, labels_active):
+        """
+        Return a0_scaled for the active parameters.
+        Note: model uses a_scaled, with a = a_scaled / s_a.
+        """
         nA = len(active_idx)
         if nA == 0:
             return np.zeros(0, dtype=float)
 
+        if init == "totani":
+            # Totani-style start: known comps ~1, unknown/halo start 0.
+            # We treat: ps/gas/ics/iso/loop as "known".
+            a0 = np.zeros(nA, dtype=float)
+            for ii, lab in enumerate(labels_active):
+                lab_l = lab.lower()
+                if ("ps" == lab_l) or ("point" in lab_l and "source" in lab_l):
+                    a0[ii] = 1.0
+                elif ("gas" in lab_l) or ("pi0" in lab_l) or ("brem" in lab_l) or ("ics" in lab_l) or ("iem" in lab_l) or ("galprop" in lab_l):
+                    a0[ii] = 1.0
+                elif lab_l in ("iso", "isotropic"):
+                    a0[ii] = 1.0
+                elif ("loop" in lab_l):
+                    a0[ii] = 1.0
+                else:
+                    a0[ii] = 0.0  # halo/bubbles/etc start 0
+            return a0 * s_a  # convert to scaled space
+
         if init == "ones":
-            # roughly match total counts
-            return np.full(nA, max(np.sum(y) / max(nA, 1), 1.0), dtype=float)
+            a0 = np.full(nA, max(np.sum(y) / max(nA, 1), 1.0), dtype=float)
+            return a0
 
         if init == "lsq":
             a, *_ = np.linalg.lstsq(X_scaled, y, rcond=None)
-            return np.clip(a, 0.0, None) if nonneg else a
+            # if nonneg, clip only those that are constrained
+            if nonneg:
+                a = a.copy()
+                for ii, j_full in enumerate(active_idx):
+                    if j_full not in free_sign_idx:
+                        a[ii] = max(a[ii], 0.0)
+            return a
 
-        # nnls is good in scaled space
-        try:
-            a0, _ = nnls(X_scaled, y)
-            if (not np.isfinite(a0).all()) or np.all(a0 == 0):
-                a0 = np.full(nA, 1e-3, dtype=float)
-            return a0
-        except Exception:
-            return np.full(nA, 1e-3, dtype=float)
+        # init == "nnls" default:
+        # Only use nnls if ALL active params are constrained nonneg.
+        if nonneg and all(j_full not in free_sign_idx for j_full in active_idx):
+            try:
+                a0, _ = nnls(X_scaled, y)
+                if (not np.isfinite(a0).all()) or np.all(a0 == 0):
+                    a0 = np.full(nA, 1e-3, dtype=float)
+                return a0
+            except Exception:
+                return np.full(nA, 1e-3, dtype=float)
+
+        # fallback
+        return np.zeros(nA, dtype=float)
 
     for ci, cell2d in enumerate(cells):
         for k in range(nE):
@@ -158,7 +197,6 @@ def fit_cellwise_poisson_mle_counts(
                 messages[ci, k] = "no finite pixels"
                 continue
 
-            # Column scaling (per cell+bin)
             s = _col_scale(X)
             scales_store[ci, k, :] = s
 
@@ -166,21 +204,20 @@ def fit_cellwise_poisson_mle_counts(
             if not np.any(active):
                 messages[ci, k] = "all templates dropped by scale"
                 continue
-
             dropped[ci, k, :] = ~active
 
+            active_idx = np.where(active)[0]
             X_a = X[:, active]
             s_a = s[active]
             X_scaled = X_a / s_a[None, :]
 
-            # Work in scaled parameter space: a = a_scaled / s
-            # mu = X_a @ a = (X_a/s) @ a_scaled = X_scaled @ a_scaled
+            labels_active = [labels[j] for j in active_idx]
+
             def nll_and_grad_scaled(a_scaled):
                 mu = X_scaled @ a_scaled
                 mu = np.clip(mu, tiny, None)
                 nll = np.sum(mu - y * np.log(mu))
 
-                # optional ridge in scaled params (helps collinearity)
                 if ridge > 0:
                     nll = nll + 0.5 * ridge * float(np.dot(a_scaled, a_scaled))
 
@@ -198,13 +235,15 @@ def fit_cellwise_poisson_mle_counts(
                 _, g = nll_and_grad_scaled(a_scaled)
                 return g
 
-            a0_scaled = _initial_guess(y, X_scaled, np.where(active)[0])
+            a0_scaled = _initial_guess_scaled(y, X_scaled, active_idx, s_a, labels_active)
 
-            # bounds in scaled space map directly if nonneg
-            if nonneg:
-                bounds_a = [(0.0, None)] * X_scaled.shape[1]
-            else:
-                bounds_a = [(None, None)] * X_scaled.shape[1]
+            # --- bounds per active parameter (Totani-like) ---
+            bounds_a = []
+            for j_full in active_idx:
+                if nonneg and (j_full not in free_sign_idx):
+                    bounds_a.append((0.0, None))     # known components
+                else:
+                    bounds_a.append((None, None))    # halo (nfw/halo) and fb_neg
 
             opt = minimize(
                 fun,
@@ -221,9 +260,8 @@ def fit_cellwise_poisson_mle_counts(
 
             a_full = np.zeros(nComp, dtype=float)
             a_full[active] = a_active
-            # dropped templates remain 0
-
             coeff_cells[ci, k, :] = a_full
+
             success[ci, k] = bool(opt.success)
             nll_vals[ci, k] = float(opt.fun)
             messages[ci, k] = str(opt.message)
@@ -237,9 +275,12 @@ def fit_cellwise_poisson_mle_counts(
         "column_scale": column_scale,
         "drop_tol": drop_tol,
         "ridge": ridge,
+        "free_sign_labels": list(free_sign_labels),
+        "free_sign_substrings": list(free_sign_substrings),
     }
     return {"cells": cells, "coeff_cells": coeff_cells, "labels": labels, "info": info}
 
+    
 def per_bin_total_counts_from_cellwise_coeffs(*, cells, coeff_cells, templates, mask3d):
     mask3d = np.asarray(mask3d, dtype=bool)
     nCells, nE, nComp = coeff_cells.shape
