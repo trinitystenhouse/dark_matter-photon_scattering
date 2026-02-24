@@ -54,7 +54,8 @@ def psf_sigma_deg(E_GeV):
     return np.maximum(0.8 * (E_GeV) ** (-0.8), 0.2)
 
 # Catalog definition of Flux1000
-Ecat1, Ecat2 = 1.0, 100.0  # GeV
+# We do all spectral calculations in MeV to match the CCUBE EBOUNDS.
+Ecat1, Ecat2 = 1.0e3, 1.0e5  # MeV (1–100 GeV)
 
 
 # --------------------------------------------------
@@ -133,8 +134,8 @@ for src in psc:
     if (not np.isfinite(gamma)) or (gamma <= 0) or (abs(gamma - 1.0) < 1e-8):
         continue
 
-    # Normalise K so that ∫_{1}^{100} K E^{-gamma} dE = Flux1000
-    # K in ph/(cm^2 s GeV)
+    # Normalise K so that ∫_{1 GeV}^{100 GeV} K E^{-gamma} dE = Flux1000
+    # Using MeV energies here, so K is in ph/(cm^2 s MeV)
     K = F * (1.0 - gamma) / (Ecat2 ** (1.0 - gamma) - Ecat1 ** (1.0 - gamma))
 
     coord = SkyCoord(src["GLON"] * u.deg, src["GLAT"] * u.deg, frame="galactic")
