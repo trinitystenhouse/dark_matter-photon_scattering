@@ -232,6 +232,26 @@ def main():
     I0 = 1e-7
     mu_loopI = loopI_dnde * expo * omega[None, :, :] * dE_mev[:, None, None] * I0
 
+    # --- Also write separate Loop A / Loop B templates (shell1 / shell2) ---
+    def _norm_and_mu(T_in):
+        T_in = np.asarray(T_in, float)
+        T_in = np.array(T_in, copy=True)
+        T_in[~roi2d] = 0.0
+
+        vals_in = T_in[fit2d]
+        vals_in = vals_in[np.isfinite(vals_in) & (vals_in > 0)]
+        if vals_in.size == 0:
+            raise RuntimeError("Loop I sub-template has no positive pixels in fit mask")
+
+        Tn = T_in / np.mean(vals_in)
+        dnde = np.broadcast_to(Tn[None, :, :], (nE, ny, nx)).astype(float).copy()
+        mu = dnde * expo * omega[None, :, :] * dE_mev[:, None, None] * I0
+        e2 = dnde * (Ectr_mev[:, None, None] ** 2)
+        return dnde, e2, mu
+
+    loopA_dnde, loopA_E2dnde, mu_loopA = _norm_and_mu(shell1)
+    loopB_dnde, loopB_E2dnde, mu_loopB = _norm_and_mu(shell2)
+
     if args.debug:
         mu_vals = mu_loopI[:, fit2d]
         mu_vals = mu_vals[np.isfinite(mu_vals)]
@@ -254,6 +274,14 @@ def main():
     out_dnde = os.path.join(args.outdir, "loopI_dnde.fits")
     out_e2 = os.path.join(args.outdir, "loopI_E2dnde.fits")
     out_mu = os.path.join(args.outdir, "mu_loopI_counts.fits")
+
+    out_dnde_A = os.path.join(args.outdir, "loopA_dnde.fits")
+    out_e2_A = os.path.join(args.outdir, "loopA_E2dnde.fits")
+    out_mu_A = os.path.join(args.outdir, "mu_loopA_counts.fits")
+
+    out_dnde_B = os.path.join(args.outdir, "loopB_dnde.fits")
+    out_e2_B = os.path.join(args.outdir, "loopB_E2dnde.fits")
+    out_mu_B = os.path.join(args.outdir, "mu_loopB_counts.fits")
 
     write_primary_with_bunit(
         out_dnde,
@@ -285,10 +313,68 @@ def main():
         ],
     )
 
+    write_primary_with_bunit(
+        out_dnde_A,
+        loopA_dnde,
+        hdr,
+        "ph cm-2 s-1 sr-1 MeV-1",
+        [
+            "Loop A template: Shell 1 only",
+        ],
+    )
+    write_primary_with_bunit(
+        out_e2_A,
+        loopA_E2dnde,
+        hdr,
+        "MeV cm-2 s-1 sr-1",
+        [
+            "Loop A geometric template: E^2 dN/dE",
+        ],
+    )
+    write_primary_with_bunit(
+        out_mu_A,
+        mu_loopA,
+        hdr,
+        "counts",
+        [
+            "Loop A geometric template: expected counts per bin per pixel",
+        ],
+    )
+
+    write_primary_with_bunit(
+        out_dnde_B,
+        loopB_dnde,
+        hdr,
+        "ph cm-2 s-1 sr-1 MeV-1",
+        [
+            "Loop B template: Shell 2 only",
+        ],
+    )
+    write_primary_with_bunit(
+        out_e2_B,
+        loopB_E2dnde,
+        hdr,
+        "MeV cm-2 s-1 sr-1",
+        [
+            "Loop B geometric template: E^2 dN/dE",
+        ],
+    )
+    write_primary_with_bunit(
+        out_mu_B,
+        mu_loopB,
+        hdr,
+        "counts",
+        [
+            "Loop B geometric template: expected counts per bin per pixel",
+        ],
+    )
+
     print("✓ Wrote:")
     print(" ", out_mu)
     print(" ", out_dnde)
     print(" ", out_e2)
+    print(" ", out_mu_A)
+    print(" ", out_mu_B)
 
 
 if __name__ == "__main__":

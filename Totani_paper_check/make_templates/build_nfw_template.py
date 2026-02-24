@@ -298,7 +298,6 @@ def main():
     # ROI mask (keep exactly as your pipeline)
     roi = (np.abs(lon) <= args.roi_lon) & (np.abs(lat) <= args.roi_lat)
     roi &= data_ok2d
-    J[~roi] = 0.0
 
     # Optional: pole normalisation (interpretability)
     if args.norm in ("pole", "pole+roi-sum"):
@@ -317,11 +316,11 @@ def main():
         J = J / Jpole
 
     # For fitting stability: normalise spatial template to mean=1 within ROI
-    vals = J[roi]
-    vals = vals[np.isfinite(vals) & (vals > 0)]
-    if vals.size == 0:
-        raise RuntimeError("NFW template is zero in ROI after masking.")
-    J = J / np.mean(vals)
+    # vals = J[roi]
+    # vals = vals[np.isfinite(vals) & (vals > 0)]
+    # if vals.size == 0:
+    #     raise RuntimeError("NFW template is zero in ROI after masking.")
+    # J = J / np.mean(vals)
 
     nfw_spatial = J.astype(np.float64)
 
