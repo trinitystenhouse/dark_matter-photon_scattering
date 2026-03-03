@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import os
 
 import numpy as np
@@ -7,6 +8,7 @@ import matplotlib.pyplot as plt
 from astropy.io import fits
 
 from check_component import run_component_check
+from totani_helpers.mcmc_io import add_flux_scaling_args
 
 
 def main():
@@ -19,13 +21,28 @@ def main():
     template = os.path.join(data_dir, "processed", "templates", "mu_ps_counts.fits")
     plot_dir = os.path.join(os.path.dirname(__file__), "plots_check_ps")
 
-    with fits.open(counts) as hc:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--counts", default=counts)
+    ap.add_argument("--template", default=template)
+    ap.add_argument("--plot-dir", default=plot_dir)
+    ap.add_argument("--roi-lon", type=float, default=60.0)
+    ap.add_argument("--roi-lat", type=float, default=60.0)
+    add_flux_scaling_args(
+        ap,
+        default_expo=os.path.join(data_dir, "processed", "expcube_1000to1000000.fits"),
+        default_coeff_file=os.path.join(repo_dir, "Totani_paper_check", "fig2_3", "mcmc_coefficients_fig2_3_quick.txt"),
+        default_binsz=0.125,
+        include_mcmc_component=True,
+    )
+    args = ap.parse_args()
+
+    with fits.open(str(args.counts)) as hc:
         counts_cube = np.asarray(hc[0].data, float)
         hdr = hc[0].header
         eb = hc["EBOUNDS"].data
         Ectr_mev = np.sqrt((eb["E_MIN"].astype(float) / 1000.0) * (eb["E_MAX"].astype(float) / 1000.0))
 
-    with fits.open(template) as ht:
+    with fits.open(str(args.template)) as ht:
         mu_ps = np.asarray(ht[0].data, float)
         bunit = str(ht[0].header.get("BUNIT", "")).strip()
 
@@ -58,10 +75,11 @@ def main():
     with np.errstate(divide="ignore", invalid="ignore"):
         ratio = ps_sum / np.maximum(data_sum, 1.0)
 
-    summary_path = os.path.join(plot_dir, "summary_ps.txt")
+    os.makedirs(str(args.plot_dir), exist_ok=True)
+    summary_path = os.path.join(str(args.plot_dir), "summary_ps.txt")
     with open(summary_path, "w") as f:
-        f.write(f"template: {template}\n")
-        f.write(f"counts:   {counts}\n")
+        f.write(f"template: {str(args.template)}\n")
+        f.write(f"counts:   {str(args.counts)}\n")
         f.write(f"BUNIT:    {bunit}\n")
         f.write(f"shape:    {mu_ps.shape}\n")
         f.write(f"total_mu_ps: {float(np.nansum(mu_ps)):.6e}\n")
@@ -83,14 +101,23 @@ def main():
     ax.set_ylabel("PS sum / data sum (ROI)")
     ax.grid(True, which="both", alpha=0.3)
     fig.tight_layout()
-    fig.savefig(os.path.join(plot_dir, "ps_over_data_roi_sum.png"), dpi=200)
+    fig.savefig(os.path.join(str(args.plot_dir), "ps_over_data_roi_sum.png"), dpi=200)
     plt.close(fig)
 
     return run_component_check(
         label="PS",
-        template_path=template,
-        counts_path=counts,
-        plot_dir=plot_dir,
+        template_path=str(args.template),
+        counts_path=str(args.counts),
+        roi_lon=float(args.roi_lon),
+        roi_lat=float(args.roi_lat),
+        plot_dir=str(args.plot_dir) if args.plot_dir is not None else None,
+        scale_flux=bool(args.scale_flux),
+        expo_path=getattr(args, "expo", None),
+        binsz_deg=float(getattr(args, "binsz", 0.125)),
+        mcmc_dir=str(args.mcmc_dir) if args.mcmc_dir is not None else None,
+        mcmc_stat=str(args.mcmc_stat),
+        mcmc_component=str(args.mcmc_component) if args.mcmc_component is not None else None,
+        coeff_file=str(args.coeff_file) if getattr(args, "coeff_file", None) is not None else None,
     )
 
 

@@ -14,7 +14,8 @@ import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from totani_helpers.mcmc_io import combine_loopI, load_mcmc_coeffs_by_label, save_coeff_table_txt
-from totani_helpers.fig23_mcmc import make_fig2_fig3_plots_from_mcmc
+# Lazy import: only load plotting helpers if --make-plots is requested
+# (avoids astropy import when only exporting coefficients)
 
 
 def main():
@@ -115,6 +116,9 @@ def main():
     print(f"✓ Wrote {args.out_txt}")
 
     if args.make_plots:
+        # Lazy import: only import plotting helpers when actually making plots
+        from totani_helpers.fig23_mcmc import make_fig2_fig3_plots_from_mcmc
+        
         make_fig2_fig3_plots_from_mcmc(
             counts_path=args.counts,
             expo_path=args.expo,

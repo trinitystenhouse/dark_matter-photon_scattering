@@ -57,18 +57,22 @@ def logprior_bounds_inclusive(f: np.ndarray, bounds: Sequence[Tuple[float, float
 def totani_bounds(
     labels: Sequence[str],
     *,
-    halo_keys: Sequence[str] = ("nfw", "halo"),
+    negative_keys: Sequence[str] = ("nfw", "fb_neg"),
+    halo_keys: Optional[Sequence[str]] = None,
     lo_known: float = 0.0,
 ) -> List[Tuple[float, float]]:
     """
-    Totani text: known components constrained f>=0 (or >0), halos allowed negative.
+    Totani text: known components constrained f>=0 (or >0), some components allowed negative.
     We use inclusive bounds (>=0) to allow "start at 0" for some components.
     """
-    hk = tuple(k.lower() for k in halo_keys)
+    keys = list(negative_keys)
+    if halo_keys is not None:
+        keys.extend(list(halo_keys))
+    nk = tuple(str(k).lower() for k in keys)
     bnds: List[Tuple[float, float]] = []
     for lab in labels:
         key = lab.lower()
-        if any(h in key for h in hk):
+        if any(n in key for n in nk):
             bnds.append((-np.inf, np.inf))
         else:
             bnds.append((lo_known, np.inf))
@@ -95,40 +99,46 @@ def totani_init_from_mu_counts(
     mu: np.ndarray,              # (ncomp, npix) counts-space templates for THIS energy bin
     denom: np.ndarray,           # (npix,) expo*omega*dE on the same masked pixels
     Ectr_mev: float,
-    iso_target_E2: float = 1e-4, # Totani typical initial E^2 dN/dE [MeV cm^-2 s^-1 sr^-1]
+    iso_target_E2: Optional[float] = None, # If None, iso starts at f=1 like other physical templates
     ps_keys: Sequence[str] = ("ps", "point_sources", "pointsources"),
     galprop_keys: Sequence[str] = ("gas", "ics", "galprop_gas", "galprop_ics"),
     iso_keys: Sequence[str] = ("iso", "isotropic"),
 ) -> np.ndarray:
     """
-    Totani-style initialisation, but consistent with your parameterisation:
-      - PS + GALPROP start at baseline normalization -> f=1
-      - isotropic starts at target E^2 dN/dE, converted into your dimensionless f_iso
-      - others start at 0
+    Initialize MCMC parameters for counts-space templates.
+    
+    Physical templates (ps, gas, ics, iso) start at f=1 (their baseline normalization).
+    Spatial shape templates (nfw, loopI, bubbles) start at 0.
+    
+    If iso_target_E2 is provided (legacy mode), iso will be rescaled to that target.
     """
     labels_l = [s.lower() for s in labels]
     ncomp = len(labels_l)
     f0 = np.zeros(ncomp, float)
 
+    # Physical templates with known normalization: start at f=1
     for j, lab in enumerate(labels_l):
         if lab in tuple(k.lower() for k in ps_keys):
             f0[j] = 1.0
         if lab in tuple(k.lower() for k in galprop_keys):
             f0[j] = 1.0
+        if lab in tuple(k.lower() for k in iso_keys):
+            f0[j] = 1.0
 
-    # isotropic conversion
-    jiso = None
-    for k in iso_keys:
-        k = k.lower()
-        if k in labels_l:
-            jiso = labels_l.index(k)
-            break
+    # Optional: rescale iso to target E^2 dN/dE (legacy mode)
+    if iso_target_E2 is not None:
+        jiso = None
+        for k in iso_keys:
+            k = k.lower()
+            if k in labels_l:
+                jiso = labels_l.index(k)
+                break
 
-    if jiso is not None:
-        E2_at_f1 = infer_iso_E2dNdE_at_f1(mu[jiso], denom, Ectr_mev)
-        if E2_at_f1 <= 0 or not np.isfinite(E2_at_f1):
-            raise RuntimeError(f"Inferred iso E^2 dN/dE at f=1 is invalid: {E2_at_f1}")
-        f0[jiso] = iso_target_E2 / E2_at_f1
+        if jiso is not None:
+            E2_at_f1 = infer_iso_E2dNdE_at_f1(mu[jiso], denom, Ectr_mev)
+            if E2_at_f1 <= 0 or not np.isfinite(E2_at_f1):
+                raise RuntimeError(f"Inferred iso E^2 dN/dE at f=1 is invalid: {E2_at_f1}")
+            f0[jiso] = iso_target_E2 / E2_at_f1
 
     return f0
 
@@ -143,6 +153,16 @@ def totani_mcmc_fit(
     nsteps: int = 5000,
     burn: int = 1000,
     thin: int = 5,
+    require_autocorr: bool = False,
+    early_stop: bool = False,
+    autocorr_target: float = 50.0,
+    autocorr_check_every: int = 1000,
+    autocorr_min_steps: int = 2000,
+    iso_prior_sigma_dex: Optional[float] = None,
+    iso_prior_mode: str = "f",
+    iso_prior_center: Optional[float] = None,
+    nonstable_prior_sigma_dex: Optional[float] = None,
+    nonstable_prior_centers: Optional[dict] = None,
     init_jitter_frac: float = 1e-2,
     rng: Optional[np.random.Generator] = None,
     progress: bool = False,
@@ -165,13 +185,75 @@ def totani_mcmc_fit(
     if len(bounds) != ncomp:
         raise ValueError("bounds length must match ncomp.")
 
+    labels_l = [str(x).lower() for x in labels]
+
+    def _log10_ratio_gauss(x: float, x0: float, sigma_dex: float) -> float:
+        if (sigma_dex is None) or (sigma_dex <= 0) or (not np.isfinite(sigma_dex)):
+            return 0.0
+        if (not np.isfinite(x)) or (not np.isfinite(x0)) or (x <= 0) or (x0 <= 0):
+            return -np.inf
+        z = np.log10(x / x0)
+        return -0.5 * (z / float(sigma_dex)) ** 2
+
+    def _log10_ratio_gauss_upper_only(x: float, x0: float, sigma_dex: float) -> float:
+        """Upper-only version: no penalty if x <= x0, Gaussian penalty in log-space if x > x0."""
+        if (sigma_dex is None) or (sigma_dex <= 0) or (not np.isfinite(sigma_dex)):
+            return 0.0
+        if (not np.isfinite(x)) or (not np.isfinite(x0)) or (x <= 0) or (x0 <= 0):
+            return -np.inf
+        if x <= x0:
+            return 0.0
+        z = np.log10(x / x0)
+        return -0.5 * (z / float(sigma_dex)) ** 2
+
+    def logprior_gaussian(f: np.ndarray) -> float:
+        lp = 0.0
+
+        # ISO prior (log-space around iso_prior_center)
+        if iso_prior_sigma_dex is not None:
+            jiso = None
+            for key in ("iso", "isotropic"):
+                if key in labels_l:
+                    jiso = labels_l.index(key)
+                    break
+            if jiso is not None:
+                center = iso_prior_center
+                if center is None:
+                    center = float(f_init[jiso])
+                mode = str(iso_prior_mode).strip().lower()
+                if mode == "f_upper":
+                    lp_i = _log10_ratio_gauss_upper_only(float(f[jiso]), float(center), float(iso_prior_sigma_dex))
+                else:
+                    lp_i = _log10_ratio_gauss(float(f[jiso]), float(center), float(iso_prior_sigma_dex))
+                if not np.isfinite(lp_i):
+                    return -np.inf
+                lp += lp_i
+
+        # Nonstable priors (optional): dict(label->center)
+        if nonstable_prior_sigma_dex is not None:
+            centers = nonstable_prior_centers or {}
+            for lab_key, ctr in centers.items():
+                lk = str(lab_key).lower()
+                if lk not in labels_l:
+                    continue
+                j = labels_l.index(lk)
+                lp_j = _log10_ratio_gauss(float(f[j]), float(ctr), float(nonstable_prior_sigma_dex))
+                if not np.isfinite(lp_j):
+                    return -np.inf
+                lp += lp_j
+
+        return float(lp)
+
     def logprob_fn(f: np.ndarray) -> float:
         lp = logprior_bounds_inclusive(f, bounds)
         if not np.isfinite(lp):
             return -np.inf
+        lp_g = logprior_gaussian(f)
+        if not np.isfinite(lp_g):
+            return -np.inf
         Cexp = f @ mu
         ll = loglike_poisson_counts(Cobs, Cexp)
-        return lp + ll
+        return lp + lp_g + ll
 
     # -------------------------------------------------------------------------
     # Initialize walkers near f_init, making sure each has finite logprob
@@ -254,24 +336,67 @@ def totani_mcmc_fit(
         import emcee  # type: ignore
         used_emcee = True
         sampler = emcee.EnsembleSampler(nwalkers, ncomp, logprob_fn)
-        sampler.run_mcmc(p0, nsteps, progress=progress)
-        try:
-            tau = sampler.get_autocorr_time(tol=0)
-            print("tau:", tau)
-            n_over_tau = nsteps / tau
-            print("N/tau:", n_over_tau)
-            # Totani-style rule of thumb: require sufficiently many autocorrelation times.
-            # Enforce N/tau >= 50 for all parameters.
-            if np.any(~np.isfinite(n_over_tau)):
-                raise RuntimeError(f"Non-finite N/tau encountered: {n_over_tau}")
-            if np.any(n_over_tau < 50.0):
-                bad = np.where(n_over_tau < 50.0)[0].tolist()
-                raise RuntimeError(
-                    f"Autocorr convergence check failed: N/tau < 50 for parameter indices {bad}. "
-                    f"Min N/tau={float(np.min(n_over_tau)):.3f}. Increase nsteps."
-                )
-        except Exception as e:
-            print("autocorr time not available yet:", repr(e))
+        if early_stop:
+            total = int(nsteps)
+            step = max(1, int(autocorr_check_every))
+            min_steps = int(autocorr_min_steps)
+            state = None
+            n_done = 0
+
+            while n_done < total:
+                n_chunk = min(step, total - n_done)
+                state = sampler.run_mcmc(p0 if state is None else state, n_chunk, progress=progress)
+                n_done += int(n_chunk)
+
+                if n_done < min_steps:
+                    continue
+                if n_done <= burn:
+                    continue
+
+                try:
+                    tau = sampler.get_autocorr_time(tol=0)
+                    n_over_tau = n_done / tau
+                    if np.any(~np.isfinite(n_over_tau)):
+                        raise RuntimeError(f"Non-finite N/tau encountered: {n_over_tau}")
+                    if bool(early_stop) and np.all(n_over_tau >= float(autocorr_target)):
+                        print("tau:", tau)
+                        print("N/tau:", n_over_tau)
+                        print(f"Early stop: reached N/tau >= {float(autocorr_target):g} for all params at N={n_done}")
+                        break
+                except Exception as e:
+                    if bool(require_autocorr):
+                        raise RuntimeError(f"Autocorr convergence check requested but failed: {repr(e)}") from e
+                    # Not available yet; keep going.
+                    pass
+
+            # Final report (best effort)
+            try:
+                tau = sampler.get_autocorr_time(tol=0)
+                print("tau:", tau)
+                print("N/tau:", n_done / tau)
+            except Exception as e:
+                print("autocorr time not available yet:", repr(e))
+        else:
+            sampler.run_mcmc(p0, nsteps, progress=progress)
+            try:
+                tau = sampler.get_autocorr_time(tol=0)
+                print("tau:", tau)
+                n_over_tau = nsteps / tau
+                print("N/tau:", n_over_tau)
+                # Totani-style rule of thumb: require sufficiently many autocorrelation times.
+                # Enforce N/tau >= 50 for all parameters.
+                if np.any(~np.isfinite(n_over_tau)):
+                    raise RuntimeError(f"Non-finite N/tau encountered: {n_over_tau}")
+                if np.any(n_over_tau < float(autocorr_target)):
+                    bad = np.where(n_over_tau < float(autocorr_target))[0].tolist()
+                    raise RuntimeError(
+                        f"Autocorr convergence check failed: N/tau < {float(autocorr_target):g} for parameter indices {bad}. "
+                        f"Min N/tau={float(np.min(n_over_tau)):.3f}. Increase nsteps."
+                    )
+            except Exception as e:
+                if bool(require_autocorr):
+                    raise RuntimeError(f"Autocorr convergence check requested but failed: {repr(e)}") from e
+                print("autocorr time not available yet:", repr(e))
         chain = sampler.get_chain()
         logprob = sampler.get_log_prob()
         acc = sampler.acceptance_fraction
@@ -306,11 +431,17 @@ def totani_mcmc_fit(
     # -------------------------------------------------------------------------
     # Summarize posterior
     # -------------------------------------------------------------------------
-    if burn >= nsteps:
-        raise ValueError("burn must be < nsteps.")
+    nsteps_eff = int(chain.shape[0])
+    if burn >= nsteps_eff:
+        raise ValueError(f"burn must be < nsteps_done. burn={burn}, nsteps_done={nsteps_eff}")
 
     post = chain[burn::thin, :, :].reshape(-1, ncomp)
     post_lp = logprob[burn::thin, :].reshape(-1)
+    if post.shape[0] == 0:
+        raise RuntimeError(
+            f"No posterior samples available after burn/thin. "
+            f"nsteps_done={nsteps_eff}, burn={burn}, thin={thin}."
+        )
 
     imax = int(np.nanargmax(post_lp))
     f_ml = post[imax].copy()

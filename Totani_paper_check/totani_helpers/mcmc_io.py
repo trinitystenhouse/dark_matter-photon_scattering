@@ -13,6 +13,111 @@ class MCMCCoeffTable:
     bins_present: np.ndarray
 
 
+def add_flux_scaling_args(
+    parser,
+    *,
+    default_expo: Optional[str] = None,
+    default_coeff_file: Optional[str] = None,
+    default_binsz: float = 0.125,
+    include_mcmc_component: bool = True,
+    include_expo: bool = True,
+    include_binsz: bool = True,
+):
+    parser.add_argument(
+        "--scale-flux",
+        action="store_true",
+        help="Also compute ROI-averaged E^2 dN/dE using MCMC coefficients and exposure",
+    )
+    if include_expo:
+        parser.add_argument(
+            "--expo",
+            default=default_expo,
+            help="Exposure cube FITS (required for --scale-flux)",
+        )
+    if include_binsz:
+        parser.add_argument(
+            "--binsz",
+            type=float,
+            default=float(default_binsz),
+            help="Pixel size in degrees (for solid angle; required for --scale-flux)",
+        )
+    parser.add_argument(
+        "--coeff-file",
+        default=default_coeff_file,
+        help="Coefficient table .txt file (optional alternative to --mcmc-dir)",
+    )
+    parser.add_argument(
+        "--mcmc-dir",
+        default=None,
+        help="MCMC results directory (required for --scale-flux)",
+    )
+    parser.add_argument(
+        "--mcmc-stat",
+        choices=["f_ml", "f_p50", "f_p16", "f_p84"],
+        default="f_ml",
+        help="Which MCMC summary coefficient to use per bin",
+    )
+    if include_mcmc_component:
+        parser.add_argument(
+            "--mcmc-component",
+            default=None,
+            help="Component key in MCMC outputs (default: match --label)",
+        )
+    return parser
+
+
+def load_coeff_table_txt(*, coeff_file: str, nE: Optional[int] = None) -> MCMCCoeffTable:
+    if not os.path.exists(str(coeff_file)):
+        raise FileNotFoundError(f"Coefficient file not found: {coeff_file}")
+
+    with open(str(coeff_file), "r") as f:
+        header = f.readline().strip()
+        if header.startswith("#"):
+            header = header.lstrip("#").strip()
+        cols = header.split()
+        if len(cols) < 2:
+            raise ValueError(f"Malformed coefficient header: '{header}'")
+
+        rows: List[List[float]] = []
+        for line in f:
+            line = line.strip()
+            if (not line) or line.startswith("#"):
+                continue
+            parts = line.split()
+            try:
+                rows.append([float(x) for x in parts])
+            except Exception:
+                continue
+
+    if not rows:
+        raise ValueError(f"No coefficient rows found in: {coeff_file}")
+
+    arr = np.asarray(rows, dtype=float)
+    if arr.ndim != 2 or arr.shape[1] < 2:
+        raise ValueError(f"Coefficient table has unexpected shape {arr.shape} in {coeff_file}")
+
+    x = arr[:, 0]
+    labels = [str(c) for c in cols[1:]]
+    data = arr[:, 1:]
+    if data.shape[1] != len(labels):
+        raise ValueError(
+            f"Header/data mismatch in {coeff_file}: header has {len(labels)} columns but data has {data.shape[1]}"
+        )
+
+    if nE is None:
+        nE = int(data.shape[0])
+
+    coeffs_by_name: Dict[str, np.ndarray] = {}
+    for j, lab in enumerate(labels):
+        v = np.full(int(nE), np.nan, dtype=float)
+        ncopy = min(int(nE), int(data.shape[0]))
+        v[:ncopy] = np.asarray(data[:ncopy, j], float)
+        coeffs_by_name[str(lab)] = v
+
+    bins_present = np.arange(min(int(nE), int(data.shape[0])), dtype=int)
+    return MCMCCoeffTable(labels=[str(x) for x in labels], coeffs_by_label=coeffs_by_name, bins_present=bins_present)
+
+
 def _find_mcmc_bins(*, mcmc_dir: str) -> np.ndarray:
     if not os.path.isdir(mcmc_dir):
         raise FileNotFoundError(f"MCMC directory not found: {mcmc_dir}")
@@ -132,3 +237,73 @@ def save_coeff_table_txt(
     arr = np.column_stack(cols)
     header = " ".join(labs)
     np.savetxt(out_txt, arr, header=header)
+
+
+def E2_spectra_from_global_coeffs_counts(
+    *,
+    labels: Sequence[str],
+    templates: Sequence[np.ndarray],
+    coeffs_by_label: Dict[str, np.ndarray],
+    expo: np.ndarray,
+    omega: np.ndarray,
+    dE_mev: np.ndarray,
+    Ectr_mev: np.ndarray,
+    mask3d: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute ROI-averaged E^2 dN/dE per component from counts-space templates.
+
+    Assumptions:
+    - templates[j] has shape (nE, ny, nx) and is in expected counts per pixel.
+    - coeffs_by_label[label][k] is the multiplicative coefficient for that template at bin k.
+    - expo has shape (nE, ny, nx), omega has shape (ny, nx), dE_mev/Ectr_mev have shape (nE,).
+    - mask3d has shape (nE, ny, nx) and True means include.
+
+    Returns
+    - E2_comp: (ncomp, nE)
+    - E2_model: (nE,) sum over components
+    """
+    labels = [str(x) for x in labels]
+    templates = [np.asarray(t, float) for t in templates]
+    expo = np.asarray(expo, float)
+    omega = np.asarray(omega, float)
+    dE_mev = np.asarray(dE_mev, float).reshape(-1)
+    Ectr_mev = np.asarray(Ectr_mev, float).reshape(-1)
+    mask3d = np.asarray(mask3d, dtype=bool)
+
+    if len(labels) != len(templates):
+        raise ValueError(f"labels length {len(labels)} != templates length {len(templates)}")
+    nE = int(Ectr_mev.shape[0])
+
+    E2_comp = np.full((len(labels), nE), np.nan, dtype=float)
+    E2_model = np.full(nE, np.nan, dtype=float)
+
+    for k in range(nE):
+        mk = mask3d[k]
+        if not np.any(mk):
+            continue
+
+        denom_map = expo[k] * omega * float(dE_mev[k])
+        denom = float(np.nansum(denom_map[mk]))
+        if (not np.isfinite(denom)) or denom <= 0:
+            continue
+
+        e2 = float(Ectr_mev[k]) ** 2
+        total_counts = 0.0
+
+        for j, lab in enumerate(labels):
+            a = pick_coeff(coeffs_by_label=coeffs_by_label, template_key=str(lab))
+            a = np.asarray(a, float).reshape(-1)
+            if k >= a.shape[0]:
+                continue
+            ak = float(a[k])
+            if not np.isfinite(ak):
+                continue
+
+            counts_map = ak * templates[j][k]
+            c = float(np.nansum(np.asarray(counts_map, float)[mk]))
+            total_counts += c
+            E2_comp[j, k] = e2 * (c / denom)
+
+        E2_model[k] = e2 * (total_counts / denom)
+
+    return E2_comp, E2_model

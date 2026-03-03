@@ -31,6 +31,8 @@ from matplotlib.colors import LogNorm
 from astropy.io import fits
 from astropy.wcs import WCS
 
+from totani_helpers.mcmc_io import combine_loopI, load_coeff_table_txt, pick_coeff
+
 from totani_helpers.totani_io import (
     pixel_solid_angle_map,
     read_expcube_energies_mev,
@@ -355,12 +357,16 @@ def main():
     ap.add_argument("--plot-lonwin", type=float, default=5.0, help="Longitude half-width (deg) for latitude profile")
     ap.add_argument("--map-norm", choices=["linear", "log"], default="log", help="Map color normalization")
     ap.add_argument("--show", action="store_true", help="Show plots interactively (in addition to saving)")
-    ap.add_argument("--coeff-file", default=None, help="Coefficient file from fitting (e.g., fit_coefficients_fig2_highlat.txt)")
-    ap.add_argument("--component-name", default="LOOPI", help="Component name in coefficient file (default: LOOPI)")
+    ap.add_argument(
+        "--coeff-file",
+        default=os.path.join(REPO_DIR, "Totani_paper_check", "fig2_3", "mcmc_coefficients_fig2_3_quick.txt"),
+        help="Coefficient table .txt file (e.g., mcmc_coefficients_fig2_3_quick.txt)",
+    )
+    ap.add_argument("--component-name", default="loopI", help="Component key in coefficient file (default: loopI)")
     ap.add_argument(
         "--coeff-mode",
         choices=["multiplier", "counts"],
-        default="counts",
+        default="multiplier",
         help="How to interpret the coefficient column: 'multiplier' means model=coeff*mu; 'counts' means coeff is total counts in ROI per bin.",
     )
 
@@ -618,7 +624,7 @@ def main():
                 plt.show()
             plt.close(fig)
 
-    # --- Plot scaled flux if coefficient file provided ---
+    # --- Plot scaled flux (uses coefficient table .txt) ---
     if args.coeff_file is not None:
         if not os.path.exists(args.coeff_file):
             print(f"\n⚠ Coefficient file not found: {args.coeff_file}")
@@ -627,8 +633,16 @@ def main():
         else:
             print(f"\n[SCALED FLUX] Reading coefficients from: {args.coeff_file}")
             try:
-                Ectr_gev_coeff, coeffs = read_coefficients(args.coeff_file, args.component_name)
-                print(f"[SCALED FLUX] Component: {args.component_name}")
+                tab = load_coeff_table_txt(coeff_file=str(args.coeff_file), nE=int(nE))
+
+                coeffs_by_label = tab.coeffs_by_label
+                if str(args.component_name).lower() == "loopi":
+                    coeffs_by_label = combine_loopI(coeffs_by_label=coeffs_by_label, out_key="loopI", drop_inputs=False)
+
+                coeffs = pick_coeff(coeffs_by_label=coeffs_by_label, template_key=str(args.component_name))
+                coeffs = np.asarray(coeffs, float).reshape(-1)
+                Ectr_gev_coeff = np.asarray(Ectr_mev, float) / 1000.0
+                print(f"[SCALED FLUX] Component key: {args.component_name}")
                 print(f"[SCALED FLUX] Coefficient range: {np.nanmin(coeffs):.3e} to {np.nanmax(coeffs):.3e}")
                 plot_scaled_flux(
                     Ectr_gev_coeff,

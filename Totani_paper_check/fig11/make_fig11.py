@@ -6,6 +6,7 @@ import sys
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.colors import TwoSlopeNorm
 from scipy.ndimage import gaussian_filter
 from astropy.io import fits
@@ -26,6 +27,7 @@ from totani_helpers.cellwise_fit import (
     per_bin_total_counts_from_cellwise_coeffs,
 )
 from totani_helpers.fit_utils import build_fit_mask3d
+from totani_helpers.mcmc_io import combine_loopI, load_mcmc_coeffs_by_label
 
 REPO_DIR_DEFAULT = os.environ.get(
     "REPO_PATH",
@@ -163,7 +165,8 @@ def smooth_map_deg(arr2d, sigma_deg, binsz_deg):
 
 def make_totani_fig11_like_with_extmask(
     data_counts,                  # 2D counts at energy bin k
-    model_except_halo_counts,      # 2D counts (all fitted comps except halo)
+    model_except_halo_nohalo_counts,  # 2D counts (all fitted comps except halo) from NO-HALO fit
+    model_except_halo_halo_counts,    # 2D counts (all fitted comps except halo) from WITH-HALO fit
     halo_counts,                  # 2D counts for halo (template * best-fit coeff)
     expo_map,                     # 2D exposure [cm^2 s]
     omega_sr_map,                 # 2D solid angle per pixel [sr]
@@ -193,9 +196,9 @@ def make_totani_fig11_like_with_extmask(
       - extmask2d True pixels are shown in grey (like the grey circles/regions).
     """
     # counts-space maps
-    resid_nohalo_counts   = data_counts - model_except_halo_counts
-    resid_withhalo_counts = data_counts - (model_except_halo_counts + halo_counts)
-    halo_plus_resid_counts = data_counts - model_except_halo_counts  # = halo + resid_withhalo
+    resid_nohalo_counts = data_counts - model_except_halo_nohalo_counts
+    resid_withhalo_counts = data_counts - (model_except_halo_halo_counts + halo_counts)
+    halo_plus_resid_counts = data_counts - model_except_halo_halo_counts  # = halo + resid_withhalo
 
     # convert to flux
     tl = counts_to_flux(resid_nohalo_counts, expo_map, omega_sr_map, dE_mev)
@@ -219,7 +222,11 @@ def make_totani_fig11_like_with_extmask(
 
     # plotting setup
     norm = TwoSlopeNorm(vmin=-vlim, vcenter=0.0, vmax=vlim)
-    cmap = plt.get_cmap("seismic").copy()
+    cmap = LinearSegmentedColormap.from_list(
+        "cyan_blue_black_orange_yellow",
+        ["cyan", "blue", "black", "orangered", "yellow"],
+        N=256,
+    ).copy()
     cmap.set_bad(color="0.6")  # masked regions grey
 
     disk_overlay = None
@@ -279,7 +286,8 @@ def make_totani_fig11_like_with_extmask(
 
 def make_totani_fig11_like_with_extmask_stacked(
     data_counts,
-    model_except_halo_counts,
+    model_except_halo_nohalo_counts,
+    model_except_halo_halo_counts,
     halo_counts,
     denom_map,
     extmask2d=None,
@@ -291,9 +299,9 @@ def make_totani_fig11_like_with_extmask_stacked(
     out_png="totani_fig11_like_stacked.png",
     energy_label="stack",
 ):
-    resid_nohalo_counts = data_counts - model_except_halo_counts
-    resid_withhalo_counts = data_counts - (model_except_halo_counts + halo_counts)
-    halo_plus_resid_counts = data_counts - model_except_halo_counts
+    resid_nohalo_counts = data_counts - model_except_halo_nohalo_counts
+    resid_withhalo_counts = data_counts - (model_except_halo_halo_counts + halo_counts)
+    halo_plus_resid_counts = data_counts - model_except_halo_halo_counts
 
     tl = counts_to_flux_from_denom(resid_nohalo_counts, denom_map)
     tr = counts_to_flux_from_denom(halo_plus_resid_counts, denom_map)
@@ -311,61 +319,54 @@ def make_totani_fig11_like_with_extmask_stacked(
             arr[extmask2d] = np.nan
 
     norm = TwoSlopeNorm(vmin=-vlim, vcenter=0.0, vmax=vlim)
-    cmap = plt.get_cmap("seismic").copy()
+    cmap = LinearSegmentedColormap.from_list(
+        "cyan_blue_black_orange_yellow",
+        ["cyan", "blue", "black", "orangered", "yellow"],
+        N=256,
+    ).copy()
     cmap.set_bad(color="0.6")
 
-    disk_overlay = None
-    if disk_band_2d is not None:
-        disk_band_2d = np.asarray(disk_band_2d, dtype=bool)
-        disk_overlay = np.where(disk_band_2d, 1.0, np.nan)
 
-    def draw_panel(ax, img, text):
-        im = ax.imshow(img, origin="lower", cmap=cmap, norm=norm, interpolation="nearest")
-        if disk_overlay is not None:
-            ax.imshow(
-                disk_overlay,
-                origin="lower",
-                cmap="gray",
-                vmin=0.0,
-                vmax=1.0,
-                alpha=0.85,
-                interpolation="nearest",
-            )
-        ax.text(
-            0.03,
-            0.93,
-            text,
-            transform=ax.transAxes,
-            color="white",
-            fontsize=10,
-            ha="left",
-            va="top",
-        )
-        ax.set_xlabel("Galactic longitude")
-        ax.set_ylabel("Galactic latitude")
-        cbar = plt.colorbar(im, ax=ax, orientation="horizontal", pad=0.08, fraction=0.06, location="top")
-        cbar.set_label(r"flux  [cm$^{-2}$ s$^{-1}$ sr$^{-1}$ MeV$^{-1}$]")
-        return im
+def _build_nonhalo_model_map_k(
+    *,
+    k: int,
+    coeffs_by_label: dict,
+    templates_dir: str,
+    nE: int,
+    ny: int,
+    nx: int,
+):
+    components = {
+        "ics": ["mu_ics_counts.fits"],
+        "iso": ["mu_iso_counts.fits"],
+        "gas": ["mu_gas_counts.fits"],
+        "ps": ["mu_ps_counts.fits"],
+    }
 
-    if wcs is None:
-        fig, axes = plt.subplots(2, 2, figsize=(10.5, 9.0), constrained_layout=True)
-    else:
-        fig = plt.figure(figsize=(10.5, 9.0), constrained_layout=True)
-        axes = np.array(
-            [
-                [fig.add_subplot(2, 2, 1, projection=wcs), fig.add_subplot(2, 2, 2, projection=wcs)],
-                [fig.add_subplot(2, 2, 3, projection=wcs), fig.add_subplot(2, 2, 4, projection=wcs)],
-            ]
-        )
+    if "loopI" in coeffs_by_label:
+        components["loopI"] = ["mu_loopI_counts.fits"]
+    elif ("loopA" in coeffs_by_label) and ("loopB" in coeffs_by_label):
+        components["loopA"] = ["mu_loopA_counts.fits"]
+        components["loopB"] = ["mu_loopB_counts.fits"]
 
-    draw_panel(axes[0, 0], tl, rf"{energy_label}, no-halo fit residual")
-    draw_panel(axes[0, 1], tr, rf"{energy_label}, NFW-$\rho^2$ model+residual")
-    draw_panel(axes[1, 0], bl, rf"{energy_label}, NFW-$\rho^2$ model")
-    draw_panel(axes[1, 1], br, rf"{energy_label}, NFW-$\rho^2$ fit residual")
+    if "fb_flat" in coeffs_by_label:
+        components["fb_flat"] = ["mu_fb_flat_counts.fits", "mu_bubbles_flat_binary_counts.fits"]
+    elif ("fb_pos" in coeffs_by_label) and ("fb_neg" in coeffs_by_label):
+        components["fb_pos"] = ["mu_fb_pos_counts.fits"]
+        components["fb_neg"] = ["mu_fb_neg_counts.fits"]
 
-    fig.savefig(out_png, dpi=250)
-    plt.close(fig)
-    print("✓ wrote", out_png)
+    model = np.zeros((ny, nx), dtype=float)
+    for lab, candidates in components.items():
+        if lab not in coeffs_by_label:
+            continue
+        path = pick_existing(str(templates_dir), candidates)
+        if path is None:
+            raise FileNotFoundError(f"Missing template for {lab}; tried {candidates} in {templates_dir}")
+        mu, _ = _read_cube(path, expected_shape=(nE, ny, nx))
+        ak = float(np.asarray(coeffs_by_label[str(lab)], float).reshape(-1)[k])
+        if np.isfinite(ak) and ak != 0.0:
+            model += ak * np.asarray(mu[k], float)
+    return model
 
 def fit_per_bin_poisson_mle_cellwise_counts(
     counts,
@@ -706,6 +707,11 @@ def main():
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
 
+    mcmc_dir_nohalo = args.mcmc_dir_nohalo or args.mcmc_dir
+    mcmc_dir_halo = args.mcmc_dir_halo or args.mcmc_dir
+    if (mcmc_dir_nohalo is None) or (mcmc_dir_halo is None):
+        raise SystemExit("Provide either --mcmc-dir (for both) or both --mcmc-dir-nohalo and --mcmc-dir-halo")
+
     # Load counts + EBOUNDS
     counts, hdr, Emin, Emax, Ectr_mev, dE_mev = read_counts_and_ebounds(args.counts)
     nE, ny, nx = counts.shape
@@ -957,20 +963,35 @@ def main():
 
     ap.add_argument("--cell-deg", type=float, default=10.0)
     ap.add_argument(
-        "--nohalo-coeff-out",
+        "--mcmc-dir",
         default=None,
-        help="Output coeff file for the internally-generated no-halo fit (default: <outdir>/fit_coefficients_fig11_nohalo.txt)",
+        help="If set alone, used for both no-halo and with-halo panels.",
     )
     ap.add_argument(
-        "--reuse-nohalo",
+        "--mcmc-dir-nohalo",
+        default=None,
+        help="MCMC directory for the fit WITHOUT halo component.",
+    )
+    ap.add_argument(
+        "--mcmc-dir-halo",
+        default=None,
+        help="MCMC directory for the fit WITH halo component.",
+    )
+    ap.add_argument(
+        "--mcmc-stat",
+        choices=["f_ml", "f_p50", "f_p16", "f_p84"],
+        default="f_ml",
+        help="Which MCMC summary coefficient to use per bin",
+    )
+    ap.add_argument(
+        "--halo-label",
+        default="nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno",
+        help="Halo component key in the with-halo MCMC outputs.",
+    )
+    ap.add_argument(
+        "--combine-loopI",
         action="store_true",
-        help="If set and --nohalo-coeff-out exists, reuse it instead of re-fitting.",
-    )
-
-    ap.add_argument(
-        "--coeff-file",
-        required=True,
-        help="Per-bin total counts coefficients file (e.g. fig2_3/plots_fig2_3/fit_coefficients_fig2_highlat.txt)",
+        help="If loopA/loopB exist but not loopI, use loopI=loopA+loopB.",
     )
 
     args = ap.parse_args()
@@ -1020,91 +1041,65 @@ def main():
     print(f"[fig11] ext-mask masked frac in ROI&disk: k={k:02d} -> {frac_masked_k:.4f} ; avg over bins -> {frac_masked_all:.4f}")
 
     templates_dir = args.templates_dir
-    base_names = [
-        "mu_ics_counts.fits",
-        "mu_iso_counts.fits",
-        "mu_gas_counts.fits",
-        "mu_ps_counts.fits",
-        "mu_loopI_counts.fits",
-        "mu_bubbles_flat_binary_counts.fits",
-    ]
-    base_mu = []
-    for fn in base_names:
-        path = os.path.join(templates_dir, fn)
-        d, _ = _read_cube(path, expected_shape=(nE, ny, nx))
-        base_mu.append(d)
 
-    halo_path = os.path.join(templates_dir, "mu_nfw_rho2.5_g1.25_counts.fits")
+    tab_nohalo = load_mcmc_coeffs_by_label(mcmc_dir=str(mcmc_dir_nohalo), stat=str(args.mcmc_stat), nE=nE)
+    coeffs_nohalo = dict(tab_nohalo.coeffs_by_label)
+    tab_halo = load_mcmc_coeffs_by_label(mcmc_dir=str(mcmc_dir_halo), stat=str(args.mcmc_stat), nE=nE)
+    coeffs_halo = dict(tab_halo.coeffs_by_label)
+
+    if bool(args.combine_loopI):
+        coeffs_nohalo = combine_loopI(coeffs_by_label=coeffs_nohalo, out_key="loopI", drop_inputs=True)
+        coeffs_halo = combine_loopI(coeffs_by_label=coeffs_halo, out_key="loopI", drop_inputs=True)
+
+    halo_label_used = str(args.halo_label)
+    if halo_label_used not in coeffs_halo:
+        nfw_keys = sorted([k for k in coeffs_halo.keys() if str(k).lower().startswith("nfw_")])
+        if len(nfw_keys) == 1:
+            halo_label_used = str(nfw_keys[0])
+            print(f"[fig11] --halo-label not found; auto-using halo label from MCMC outputs: {halo_label_used}")
+        else:
+            raise SystemExit(
+                f"Missing halo label in with-halo MCMC outputs: {str(args.halo_label)}\n"
+                f"Available nfw_* labels: {nfw_keys}"
+            )
+
+    halo_path = pick_existing(
+        str(templates_dir),
+        [
+            f"mu_{halo_label_used}_counts.fits",
+            f"mu_{str(args.halo_label)}_counts.fits",
+            "mu_nfw_rho2.5_g1.25_counts.fits",
+        ],
+    )
+    if halo_path is None:
+        raise FileNotFoundError(f"Missing halo template for label '{halo_label_used}' in {templates_dir}")
     halo_mu, _ = _read_cube(halo_path, expected_shape=(nE, ny, nx))
 
-    coeff_path = args.coeff_file
-    if not os.path.isabs(coeff_path):
-        coeff_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fig2_3", coeff_path))
-    if not os.path.exists(coeff_path):
-        raise SystemExit(f"Coefficient file not found: {coeff_path}")
+    model_nonhalo_nohalo = _build_nonhalo_model_map_k(
+        k=k,
+        coeffs_by_label=coeffs_nohalo,
+        templates_dir=templates_dir,
+        nE=nE,
+        ny=ny,
+        nx=nx,
+    )
+    model_nonhalo_halo = _build_nonhalo_model_map_k(
+        k=k,
+        coeffs_by_label=coeffs_halo,
+        templates_dir=templates_dir,
+        nE=nE,
+        ny=ny,
+        nx=nx,
+    )
 
-    # ------------------------------------------------------------
-    # (1) Generate a Fig2_3-like fit WITHOUT halo (cellwise Poisson MLE),
-    #     save per-bin total counts, and build the no-halo model map at k.
-    # ------------------------------------------------------------
-    nohalo_out = args.nohalo_coeff_out
-    if nohalo_out is None:
-        nohalo_out = os.path.join(args.outdir, "fit_coefficients_fig11_nohalo.txt")
-
-    nohalo_labels = ["ics", "iso", "gas", "ps", "loopI", "bubbles_flat_binary"]
-    if (not args.reuse_nohalo) or (not os.path.exists(nohalo_out)):
-        res_fit = fit_cellwise_poisson_mle_counts(
-            counts=counts,
-            templates=base_mu,
-            mask3d=fit_mask3d,
-            lon=lon,
-            lat=lat,
-            roi_lon=float(args.roi_lon),
-            roi_lat=float(args.roi_lat),
-            cell_deg=float(args.cell_deg),
-            nonneg=True,
-        )
-        cells = res_fit["cells"]
-        coeff_cells = res_fit["coeff_cells"]
-
-        totals = per_bin_total_counts_from_cellwise_coeffs(
-            cells=cells,
-            coeff_cells=coeff_cells,
-            templates=base_mu,
-            mask3d=fit_mask3d,
-        )
-        with open(nohalo_out, "w") as f:
-            f.write("# k  Ectr(GeV)  " + "  ".join(nohalo_labels) + "\n")
-            for kk in range(nE):
-                f.write(
-                    f"{kk:02d} {Ectr_gev[kk]:.6g} "
-                    + " ".join(f"{totals[kk, j]:.6g}" for j in range(len(nohalo_labels)))
-                    + "\n"
-                )
-        print("✓ wrote", nohalo_out)
-    else:
-        print("[fig11] reusing no-halo coefficients:", nohalo_out)
-
-    # Read no-halo total counts at target k and build the no-halo model map
-    nohalo_counts = []
-    for lab in nohalo_labels:
-        _, c = read_coeff_counts(nohalo_out, lab)
-        nohalo_counts.append(float(c[k]))
-    model_nohalo = np.zeros((ny, nx), dtype=float)
-    for Ck, mu in zip(nohalo_counts, base_mu):
-        model_nohalo += counts_coeff_to_map(mu[k], Ck, fit_mask2d)
-
-    # ------------------------------------------------------------
-    # (2) Halo counts from your existing Fig2/3 coefficient file
-    # ------------------------------------------------------------
-    _, halo_counts_arr = read_coeff_counts(coeff_path, "nfw")
-    halo_counts_k = float(halo_counts_arr[k])
-    halo_bestfit = counts_coeff_to_map(halo_mu[k], halo_counts_k, fit_mask2d)
+    halo_coeff_k = float(np.asarray(coeffs_halo[str(halo_label_used)], float).reshape(-1)[k])
+    halo_bestfit = halo_coeff_k * np.asarray(halo_mu[k], float)
 
     out_png = os.path.join(args.outdir, f"totani_fig11_like_E{Ectr_gev[k]:.2f}GeV.png")
     make_totani_fig11_like_with_extmask(
         data_counts=counts[k],
-        model_except_halo_counts=model_nohalo,
+        model_except_halo_nohalo_counts=model_nonhalo_nohalo,
+        model_except_halo_halo_counts=model_nonhalo_halo,
         halo_counts=halo_bestfit,
         expo_map=expo[k],
         omega_sr_map=omega,
@@ -1119,8 +1114,7 @@ def main():
         energy_label=f"{Ectr_gev[k]:.2f} GeV",
     )
 
-    nohalo_counts_all = [read_coeff_counts(nohalo_out, lab)[1] for lab in nohalo_labels]
-    halo_counts_all = read_coeff_counts(coeff_path, "nfw")[1]
+    halo_coeffs_all = np.asarray(coeffs_halo[str(halo_label_used)], float).reshape(-1)
 
     def _stack_plot(ks, tag, label):
         if len(ks) == 0:
@@ -1129,14 +1123,30 @@ def main():
         denom_sum = np.nansum(expo[ks] * omega[None, :, :] * dE_mev[ks, None, None], axis=0)
 
         model_nohalo_sum = np.zeros((ny, nx), dtype=float)
-        for j, mu in enumerate(base_mu):
-            c_arr = np.asarray(nohalo_counts_all[j], dtype=float)
-            for kk in ks:
-                model_nohalo_sum += counts_coeff_to_map(mu[kk], float(c_arr[kk]), fit_mask3d[kk])
+        model_halo_nonhalo_sum = np.zeros((ny, nx), dtype=float)
+        for kk in ks:
+            model_nohalo_sum += _build_nonhalo_model_map_k(
+                k=int(kk),
+                coeffs_by_label=coeffs_nohalo,
+                templates_dir=templates_dir,
+                nE=nE,
+                ny=ny,
+                nx=nx,
+            )
+            model_halo_nonhalo_sum += _build_nonhalo_model_map_k(
+                k=int(kk),
+                coeffs_by_label=coeffs_halo,
+                templates_dir=templates_dir,
+                nE=nE,
+                ny=ny,
+                nx=nx,
+            )
 
         halo_sum = np.zeros((ny, nx), dtype=float)
         for kk in ks:
-            halo_sum += counts_coeff_to_map(halo_mu[kk], float(halo_counts_all[kk]), fit_mask3d[kk])
+            ak = float(halo_coeffs_all[kk])
+            if np.isfinite(ak) and ak != 0.0:
+                halo_sum += ak * np.asarray(halo_mu[kk], float)
 
         extmask_stack = (roi2d & disk_keep) & (~np.all(ext_keep3d[ks], axis=0))
         out_png_stack = os.path.join(args.outdir, f"totani_fig11_like_{tag}_E{Ectr_gev[k]:.2f}GeV.png")
@@ -1148,7 +1158,8 @@ def main():
             vlim_stack = float(args.vlim)
         make_totani_fig11_like_with_extmask_stacked(
             data_counts=data_sum,
-            model_except_halo_counts=model_nohalo_sum,
+            model_except_halo_nohalo_counts=model_nohalo_sum,
+            model_except_halo_halo_counts=model_halo_nonhalo_sum,
             halo_counts=halo_sum,
             denom_map=denom_sum,
             extmask2d=extmask_stack,

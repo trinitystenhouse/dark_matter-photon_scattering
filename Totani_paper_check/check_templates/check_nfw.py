@@ -37,6 +37,8 @@ from totani_helpers.totani_io import (
     resample_exposure_logE_interp,
 )
 
+from totani_helpers.mcmc_io import load_coeff_table_txt, pick_coeff
+
 
 # -------------------------
 # Helpers
@@ -325,7 +327,7 @@ def main():
     default_dnde = os.path.join(data_dir, "processed", "templates", "nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno_dnde.fits") if data_dir else None
     default_e2 = os.path.join(data_dir, "processed", "templates", "nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno_E2dnde.fits") if data_dir else None
     default_mu = os.path.join(data_dir, "processed", "templates", "mu_nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno_counts.fits") if data_dir else None
-    default_coeffs = os.path.join(repo_dir, "Totani_paper_check", "fig2_3", "fit_coefficients_fig2_highlat.txt")
+    default_coeffs = os.path.join(repo_dir, "Totani_paper_check", "fig2_3", "mcmc_coefficients_fig2_3_quick.txt")
     ap = argparse.ArgumentParser()
     ap.add_argument("--dnde", default=default_dnde, help="nfw*_dnde.fits")
     ap.add_argument("--e2", default=default_e2, help="nfw*_E2dnde.fits")
@@ -345,12 +347,12 @@ def main():
     ap.add_argument("--plot-lonwin", type=float, default=5.0, help="Longitude half-width (deg) for latitude profile I(b)")
     ap.add_argument("--map-norm", choices=["linear", "log"], default="log", help="Map color normalization")
     ap.add_argument("--show", action="store_true", help="Show plots interactively (in addition to saving)")
-    ap.add_argument("--coeff-file", default=default_coeffs, help="Coefficient file from fitting (e.g., fit_coefficients_fig2_highlat.txt)")
-    ap.add_argument("--component-name", default="NFW", help="Component name in coefficient file (default: NFW)")
+    ap.add_argument("--coeff-file", default=default_coeffs, help="Coefficient table .txt file (e.g., mcmc_coefficients_fig2_3_quick.txt)")
+    ap.add_argument("--component-name", default="nfw", help="Component key in coefficient file (default: nfw)")
     ap.add_argument(
         "--coeff-mode",
         choices=["multiplier", "counts"],
-        default="counts",
+        default="multiplier",
         help="How to interpret the coefficient column: 'multiplier' means model=coeff*mu; 'counts' means coeff is total counts in ROI per bin.",
     )
 
@@ -628,7 +630,7 @@ def main():
     frac_increasing = float(np.mean(diffs > 0)) if np.isfinite(diffs).any() else float("nan")
     print(f"[RADIAL] frac of bins where profile increases outward = {frac_increasing:.3f} (expect small)")
 
-    # --- Plot scaled flux if coefficient file provided ---
+    # --- Plot scaled flux (uses coefficient table .txt) ---
     if args.coeff_file is not None:
         if not os.path.exists(args.coeff_file):
             print(f"\n⚠ Coefficient file not found: {args.coeff_file}")
@@ -637,9 +639,13 @@ def main():
         else:
             print(f"\n[SCALED FLUX] Reading coefficients from: {args.coeff_file}")
             try:
-                Ectr_gev_coeff, coeffs = read_coefficients(args.coeff_file, args.component_name)
-                print(f"[SCALED FLUX] Component: {args.component_name}")
+                tab = load_coeff_table_txt(coeff_file=str(args.coeff_file), nE=int(nE))
+                coeffs = pick_coeff(coeffs_by_label=tab.coeffs_by_label, template_key=str(args.component_name))
+                coeffs = np.asarray(coeffs, float).reshape(-1)
+                Ectr_gev_coeff = np.asarray(Ectr_mev, float) / 1000.0
+                print(f"[SCALED FLUX] Component key: {args.component_name}")
                 print(f"[SCALED FLUX] Coefficient range: {np.nanmin(coeffs):.3e} to {np.nanmax(coeffs):.3e}")
+
                 plot_scaled_flux(
                     Ectr_gev_coeff,
                     coeffs,
@@ -649,7 +655,7 @@ def main():
                     dE_mev,
                     roi,
                     args.plot_dir,
-                    args.component_name,
+                    str(args.component_name),
                     coeff_mode=args.coeff_mode,
                     show=args.show,
                 )
@@ -670,7 +676,7 @@ def main():
                     dE_mev_k=float(dE_mev[k_map]),
                     Ectr_mev_k=float(Ectr_mev[k_map]),
                     plot_dir=args.plot_dir,
-                    component_name=args.component_name,
+                    component_name=str(args.component_name),
                     coeff_mode=args.coeff_mode,
                     map_norm=args.map_norm,
                     show=args.show,

@@ -229,8 +229,9 @@ def main():
     loopI_dnde = np.broadcast_to(T_norm[None, :, :], (nE, ny, nx)).astype(float).copy()
 
     # Convert shape -> counts template
-    I0 = 1e-7
-    mu_loopI = loopI_dnde * expo * omega[None, :, :] * dE_mev[:, None, None] * I0
+    # Template is shape-only (already normalized to mean=1 in ROI)
+    # Fitted coefficient will be in units of flux [ph cm^-2 s^-1 sr^-1 MeV^-1]
+    mu_loopI = loopI_dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
 
     # --- Also write separate Loop A / Loop B templates (shell1 / shell2) ---
     def _norm_and_mu(T_in):
@@ -245,7 +246,7 @@ def main():
 
         Tn = T_in / np.mean(vals_in)
         dnde = np.broadcast_to(Tn[None, :, :], (nE, ny, nx)).astype(float).copy()
-        mu = dnde * expo * omega[None, :, :] * dE_mev[:, None, None] * I0
+        mu = dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
         e2 = dnde * (Ectr_mev[:, None, None] ** 2)
         return dnde, e2, mu
 

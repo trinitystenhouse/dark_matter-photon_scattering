@@ -10,6 +10,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 
 from check_component import run_component_check
+from totani_helpers.mcmc_io import add_flux_scaling_args
 from totani_helpers.totani_io import (
     pixel_solid_angle_map,
     read_expcube_energies_mev,
@@ -43,6 +44,13 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--k", type=int, default=None, help="Energy-bin index for isotropic intensity reconstruction")
+    add_flux_scaling_args(
+        ap,
+        default_expo=expo_path,
+        default_coeff_file=os.path.join(repo_dir, "Totani_paper_check", "fig2_3", "mcmc_coefficients_fig2_3_quick.txt"),
+        default_binsz=0.125,
+        include_mcmc_component=True,
+    )
     args = ap.parse_args()
 
     # Standard component plots
@@ -51,6 +59,13 @@ def main():
         template_path=template,
         counts_path=counts,
         plot_dir=plot_dir,
+        scale_flux=bool(args.scale_flux),
+        expo_path=getattr(args, "expo", None),
+        binsz_deg=float(getattr(args, "binsz", 0.125)),
+        mcmc_dir=str(args.mcmc_dir) if args.mcmc_dir is not None else None,
+        mcmc_stat=str(args.mcmc_stat),
+        mcmc_component=str(args.mcmc_component) if args.mcmc_component is not None else None,
+        coeff_file=str(args.coeff_file) if getattr(args, "coeff_file", None) is not None else None,
     )
 
     # Isotropic-specific check: reconstruct intensity for one bin

@@ -27,6 +27,9 @@ from matplotlib.colors import LogNorm
 from astropy.io import fits
 from astropy.wcs import WCS
 
+from totani_helpers.mcmc_io import add_flux_scaling_args, load_coeff_table_txt, load_mcmc_coeffs_by_label, pick_coeff
+from totani_helpers.totani_io import pixel_solid_angle_map, read_exposure, resample_exposure_logE
+
 
 def read_ebounds_from_counts_ccube(hdul):
     if "EBOUNDS" not in hdul:
@@ -107,6 +110,13 @@ def run_component_check(
     plot_dir=None,
     plot_k=None,
     map_norm="log",
+    scale_flux=False,
+    expo_path=None,
+    binsz_deg=0.125,
+    mcmc_dir=None,
+    mcmc_stat="f_ml",
+    mcmc_component=None,
+    coeff_file=None,
     show=False,
 ):
     if not os.path.exists(template_path):
@@ -181,6 +191,68 @@ def run_component_check(
             plt.show()
         plt.close(fig)
 
+        if bool(scale_flux):
+            if expo_path is None or (not os.path.exists(str(expo_path))):
+                raise SystemExit("--scale-flux requires a valid --expo")
+            if coeff_file is not None:
+                coeff_file = str(coeff_file)
+                if coeff_file.strip() == "":
+                    coeff_file = None
+
+            if (coeff_file is None) and (mcmc_dir is None):
+                raise SystemExit("--scale-flux requires --mcmc-dir or --coeff-file")
+
+            with fits.open(counts_path) as hc:
+                wcs_cel = WCS(hc[0].header).celestial
+                ny2, nx2 = int(hc[0].header["NAXIS2"]), int(hc[0].header["NAXIS1"])
+                if (ny2, nx2) != (ny, nx):
+                    raise RuntimeError("Counts shape mismatch while computing flux")
+                _Emin, _Emax, Ectr_mev, dE_mev = read_ebounds_from_counts_ccube(hc)
+
+            expo_raw, E_expo_mev = read_exposure(str(expo_path))
+            expo = resample_exposure_logE(expo_raw, E_expo_mev, Ectr_mev)
+            if expo.shape != (nE, ny, nx):
+                raise RuntimeError(f"Exposure shape {expo.shape} != counts shape {(nE, ny, nx)}")
+
+            omega = pixel_solid_angle_map(wcs_cel, ny, nx, binsz_deg=float(binsz_deg))
+
+            if coeff_file is not None:
+                tab = load_coeff_table_txt(coeff_file=str(coeff_file), nE=nE)
+            else:
+                tab = load_mcmc_coeffs_by_label(mcmc_dir=str(mcmc_dir), stat=str(mcmc_stat), nE=nE)
+
+            comp_key = str(mcmc_component) if mcmc_component is not None else str(label).lower()
+            a = pick_coeff(coeffs_by_label=tab.coeffs_by_label, template_key=comp_key)
+            a = np.asarray(a, float).reshape(-1)
+
+            e2 = (np.asarray(Ectr_mev, float) ** 2)
+            E2spec = np.full(nE, np.nan, dtype=float)
+            for kk in range(nE):
+                mk = roi & np.isfinite(cube[kk])
+                if not np.any(mk):
+                    continue
+                denom_map = expo[kk] * omega * float(dE_mev[kk])
+                denom = float(np.nansum(denom_map[mk]))
+                if (not np.isfinite(denom)) or denom <= 0:
+                    continue
+                csum = float(np.nansum((float(a[kk]) * cube[kk])[mk]))
+                E2spec[kk] = float(e2[kk]) * (csum / denom)
+
+            fig = plt.figure(figsize=(6.8, 4.6))
+            ax = fig.add_subplot(111)
+            ax.plot(Ectr_mev / 1000.0, E2spec, lw=2.0)
+            ax.set_xscale("log")
+            ax.set_yscale("log")
+            ax.set_xlabel("Ectr [GeV]")
+            ax.set_ylabel(r"$E^2 dN/dE$  [MeV cm$^{-2}$ s$^{-1}$ sr$^{-1}$]")
+            ax.set_title(f"{label} E2 spectrum (MCMC-scaled)")
+            ax.grid(True, which="both", alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(os.path.join(plot_dir, f"{label}_spectrum_E2_mcmc.png"), dpi=200)
+            if show:
+                plt.show()
+            plt.close(fig)
+
         # Latitude profile at chosen k
         lat_bins = np.linspace(-roi_lat, roi_lat, 81)
         lat_ctr = 0.5 * (lat_bins[:-1] + lat_bins[1:])
@@ -224,6 +296,13 @@ def main():
     ap.add_argument("--map-norm", choices=["linear", "log"], default="log")
     ap.add_argument("--show", action="store_true")
 
+    add_flux_scaling_args(
+        ap,
+        default_expo=os.path.join(data_dir, "processed", "expcube_1000to1000000.fits") if data_dir else None,
+        default_binsz=0.125,
+        include_mcmc_component=True,
+    )
+
     args = ap.parse_args()
 
     if args.counts is None or not os.path.exists(str(args.counts)):
@@ -238,6 +317,12 @@ def main():
         plot_dir=str(args.plot_dir) if args.plot_dir is not None else None,
         plot_k=args.plot_k,
         map_norm=str(args.map_norm),
+        scale_flux=bool(args.scale_flux),
+        expo_path=getattr(args, "expo", None),
+        binsz_deg=float(getattr(args, "binsz", 0.125)),
+        mcmc_dir=str(args.mcmc_dir) if args.mcmc_dir is not None else None,
+        mcmc_stat=str(args.mcmc_stat),
+        mcmc_component=str(args.mcmc_component) if args.mcmc_component is not None else None,
         show=bool(args.show),
     )
 

@@ -105,7 +105,7 @@ def build_totani_init_for_mu_counts(
     mu,             # (ncomp, npix) counts-space templates for this energy bin in the fit mask
     denom_vec,      # (npix,) expo*omega*dE for same pixels
     Ectr_mev,
-    iso_target_E2=1e-4,
+    iso_target_E2=1e-4,  # If None, iso starts at f=1 like other physical templates
 ):
     """
     Totani text says:
@@ -113,25 +113,27 @@ def build_totani_init_for_mu_counts(
       - isotropic initial E^2 dN/dE = 1e-4          -> for you, convert to dimensionless f_iso
       - others start at 0
     """
+    
     labels_l = [s.lower() for s in labels]
     ncomp = len(labels)
     f0 = np.zeros(ncomp, float)
 
-    # PS + GALPROP: start at their baseline normalization
+    # Physical templates with known normalization: start at f=1
     for j, lab in enumerate(labels_l):
-        if lab in ("ps", "point_sources", "pointsources", "gas", "ics"):
+        if lab in ("ps", "point_sources", "pointsources", "gas", "ics", "iso", "isotropic"):
             f0[j] = 1.0
 
-    # isotropic: convert physical target into your dimensionless scaling
-    if "iso" in labels_l or "isotropic" in labels_l:
-        jiso = labels_l.index("iso") if "iso" in labels_l else labels_l.index("isotropic")
-        E2I, I_med = _infer_E2dNdE_for_iso_at_f1(mu[jiso], denom_vec, Ectr_mev)
-        f0[jiso] = iso_target_E2 / E2I
+    # Optional: rescale iso to target E^2 dN/dE (legacy Totani behavior)
+    if iso_target_E2 is not None:
+        if "iso" in labels_l or "isotropic" in labels_l:
+            jiso = labels_l.index("iso") if "iso" in labels_l else labels_l.index("isotropic")
+            E2I, I_med = _infer_E2dNdE_for_iso_at_f1(mu[jiso], denom_vec, Ectr_mev)
+            f0[jiso] = iso_target_E2 / E2I
 
-        print("\nIsotropic init conversion:")
-        print(f"  iso at f=1 implies E^2 dN/dE = {E2I:.6e}  [MeV cm^-2 s^-1 sr^-1]")
-        print(f"  target E^2 dN/dE           = {iso_target_E2:.6e}")
-        print(f"  ==> set f_iso_init         = {f0[jiso]:.6e}")
+            print("\nIsotropic init conversion (legacy mode):")
+            print(f"  iso at f=1 implies E^2 dN/dE = {E2I:.6e}  [MeV cm^-2 s^-1 sr^-1]")
+            print(f"  target E^2 dN/dE           = {iso_target_E2:.6e}")
+            print(f"  ==> set f_iso_init         = {f0[jiso]:.6e}")
 
     # all other components: start at 0 (already)
 
@@ -268,6 +270,40 @@ def plot_mcmc_results(res, outdir, energy_bin, Ectr_mev, burn_for_plots=None):
     print(f"  Acceptance plot saved to: {acc_file}")
 
 
+def cancellation_check(k, counts, tpl_list, labels, coeff_k, mask_k):
+    y = float(np.nansum(counts[k][mask_k]))
+
+    comp_sums = {}
+    for j, lab in enumerate(labels):
+        comp_sums[str(lab)] = float(np.nansum(float(coeff_k[j]) * tpl_list[j][k][mask_k]))
+
+    model = float(np.sum(list(comp_sums.values())))
+    pos = float(np.sum([v for v in comp_sums.values() if v > 0]))
+    neg = float(np.sum([v for v in comp_sums.values() if v < 0]))
+
+    mu_pix = np.zeros_like(tpl_list[0][k], dtype=float)
+    for j in range(len(labels)):
+        mu_pix += float(coeff_k[j]) * tpl_list[j][k]
+    mu_min = float(np.nanmin(mu_pix[mask_k]))
+    mu_med = float(np.nanmedian(mu_pix[mask_k]))
+
+    lines = []
+    lines.append(f"[CANCELLATION CHECK] bin k={k}:")
+    lines.append(f"  data={y:.3e}  model={model:.3e}  model/data={model / y if y > 0 else np.nan:.3g}")
+    lines.append(
+        f"  sum(pos comps)={pos:.3e}  sum(neg comps)={neg:.3e}  "
+        f"cancellation frac={(pos + neg) / pos if pos != 0 else np.nan:.3g}"
+    )
+    lines.append(f"  mu_pix min={mu_min:.3e}  median={mu_med:.3e}")
+    lines.append("  top components by |counts|:")
+    for lab, v in sorted(comp_sums.items(), key=lambda kv: abs(kv[1]), reverse=True)[:6]:
+        lines.append(f"    {lab:20s}  {v:+.3e}")
+
+    print("\n" + "\n".join(lines))
+
+    return {"comp_sums": comp_sums, "lines": lines}
+
+
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
@@ -299,31 +335,174 @@ def main():
     ap.add_argument("--burn", type=int, default=1500)
     ap.add_argument("--thin", type=int, default=5)
     ap.add_argument("--outdir", default=os.path.join(os.path.dirname(__file__), "mcmc_results"))
+    ap.add_argument(
+        "--labels",
+        nargs="+",
+        default=None,
+        help=(
+            "Component labels to fit. Each label maps to a template file via "
+            "--templates-dir/mu_{label}_counts.fits. If omitted, uses the built-in default list."
+        ),
+    )
+    ap.add_argument(
+        "--halo-label",
+        default="nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno",
+        help=(
+            "Halo label (template key) used for bounds/diagnostics when a single halo component is present. "
+            "Ignored if --halo-labels is provided."
+        ),
+    )
+    ap.add_argument(
+        "--halo-labels",
+        nargs="+",
+        default=None,
+        help=(
+            "Explicit list of halo component keys (e.g. one nfw_* label). "
+            "If omitted, halo labels are inferred from --labels (keys starting with 'nfw_'), "
+            "or fall back to --halo-label if none found."
+        ),
+    )
+    ap.add_argument(
+        "--negative-keys",
+        nargs="+",
+        default=None,
+        help=(
+            "Substrings that identify components allowed to go negative. "
+            "Default is ['nfw', 'fb_neg'] (applied as substring matches)."
+        ),
+    )
     ap.add_argument("--iso-target-e2", type=float, default=1e-4,
-                    help="Totani isotropic init target E^2 dN/dE [MeV cm^-2 s^-1 sr^-1].")
-    ap.add_argument("--tighten-halo-neg-bound", action="store_true",
-                    help="Tighten negative bound for halo so Cexp stays >0 given the baseline components.")
+                    help="Optional: rescale iso init to this target E^2 dN/dE [MeV cm^-2 s^-1 sr^-1]. If not set, iso starts at f=1 (recommended for physical templates).")
+    ap.add_argument(
+        "--iso-prior-sigma-dex",
+        type=float,
+        default=0.5,
+        help="Gaussian prior on log10(f_iso / f_iso0) with this sigma (dex). Set to 0 to disable.",
+    )
+    ap.add_argument(
+        "--iso-prior-mode",
+        choices=["f", "f_upper"],
+        default="f_upper",
+        help=(
+            "Iso prior mode. 'f' is a symmetric log-prior centered on Totani init f0. "
+            "'f_upper' anchors the starting value but only penalizes excursions above f0 (allows drifting down)."
+        ),
+    )
+    ap.add_argument(
+        "--nonstable-prior-sigma",
+        type=float,
+        default=None,
+        help=(
+            "Optional Gaussian priors (dex) in log10(f/f0) for gas/ics/ps/iso, centered on Totani init f0. "
+            "Useful to stabilize fits."
+        ),
+    )
+    ap.add_argument(
+        "--require-autocorr",
+        action="store_true",
+        help="If set, fail the run if autocorr-time convergence check is not satisfied/available.",
+    )
+    ap.add_argument(
+        "--early-stop",
+        default=False,
+        action=argparse.BooleanOptionalAction,
+        help="If enabled, run MCMC in chunks and stop early once autocorr convergence is good enough.",
+    )
+    ap.add_argument(
+        "--autocorr-target",
+        type=float,
+        default=50.0,
+        help="Early-stop (and/or convergence) target for N/tau (Totani rule of thumb is 50).",
+    )
+    ap.add_argument(
+        "--autocorr-check-every",
+        type=int,
+        default=1000,
+        help="When --early-stop is enabled, check autocorr convergence every N steps.",
+    )
+    ap.add_argument(
+        "--autocorr-min-steps",
+        type=int,
+        default=2000,
+        help="When --early-stop is enabled, do not attempt autocorr checks before this many steps.",
+    )
+    ap.add_argument(
+        "--no-plots",
+        action="store_true",
+        help="Skip diagnostic plot generation (useful for long batch runs).",
+    )
+    ap.add_argument(
+        "--cancellation-check",
+        action="store_true",
+        help="Print per-bin diagnostic showing positive/negative component cancellations and mu_pix positivity using ML coefficients.",
+    )
+    ap.add_argument(
+        "--tighten-negative-bounds",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "Tighten negative lower bounds for any component allowed to go negative "
+            "(identified by --negative-keys, default: nfw and fb_neg), so Cexp stays >0 "
+            "given the baseline components at their Totani init values."
+        ),
+    )
+    ap.add_argument(
+        "--tighten-halo-neg-bound",
+        default=None,
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "Backward-compat alias. If set, overrides --tighten-negative-bounds."
+        ),
+    )
+    ap.add_argument("--save-chain", action="store_true",
+                    help="Save MCMC chain array (can be large; off by default to save disk space).")
+    ap.add_argument("--save-logprob", action="store_true",
+                    help="Save MCMC logprob array (can be large; off by default to save disk space).")
+    ap.add_argument("--thin-save", type=int, default=10,
+                    help="Thinning factor for saved chain/logprob (default 10 to reduce file size).")
     args = ap.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    # Component labels (keep your ordering)
-    labels = [
-        "gas",
-        "iso",
-        "ps",
-        "nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno",
-        "loopA",
-        "loopB",
-        "ics",
-        "fb_flat",
-    ]
-    halo_labels = ("nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno",)
+    # Component labels
+    if args.labels is None:
+        labels = [
+            "gas",
+            "iso",
+            "ps",
+            "nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno",
+            "loopA",
+            "loopB",
+            "ics",
+            "fb_flat",
+        ]
+    else:
+        labels = [str(x) for x in args.labels]
+
+    if args.halo_labels is not None:
+        halo_labels = tuple(str(x) for x in args.halo_labels)
+    else:
+        # Self-identify halo-like labels by substring match (not necessarily full 'nfw_*' prefix)
+        inferred = [lab for lab in labels if ("nfw" in str(lab).lower())]
+        if len(inferred) > 0:
+            halo_labels = tuple(inferred)
+        else:
+            halo_labels = (str(args.halo_label),)
+
+    if args.negative_keys is None:
+        negative_keys = ["nfw", "fb_neg"]
+    else:
+        negative_keys = [str(x) for x in args.negative_keys]
+
+    # De-duplicate while preserving order
+    _seen = set()
+    negative_keys = [k for k in negative_keys if (k not in _seen and not _seen.add(k))]
 
     print("=" * 60)
     print("MCMC Fit Configuration")
     print("=" * 60)
     print(f"Components: {labels}")
+    print(f"Negative keys: {negative_keys}")
     print(f"Energy bin: {args.energy_bin}")
     print(f"MCMC: {args.nwalkers} walkers, {args.nsteps} steps, burn={args.burn}, thin={args.thin}")
     print(f"iso init target: E^2 dN/dE = {args.iso_target_e2:.3e}")
@@ -488,22 +667,48 @@ def main():
     )
     print(f"  Initial values: {dict(zip(labels, f0))}")
 
+    # Prior centers (Totani init values)
+    labels_l = [str(x).lower() for x in labels]
+    nonstable_centers = {}
+    for key in ("gas", "ics", "ps", "iso"):
+        if key in labels_l:
+            nonstable_centers[key] = float(f0[labels_l.index(key)])
+    iso_center = None
+    for key in ("iso", "isotropic"):
+        if key in labels_l:
+            iso_center = float(f0[labels_l.index(key)])
+            break
+
     # ---- Bounds
-    bnds = totani_bounds(labels, halo_keys=halo_labels)
+    bnds = totani_bounds(labels, negative_keys=tuple(negative_keys))
 
-    # Optional: tighten halo negative bound to avoid Cexp<=0 catastrophes
-    if args.tighten_halo_neg_bound:
-        # Build baseline counts from non-halo components at f0
-        halo_idx = labels.index(halo_labels[0])
-        non_halo = [j for j in range(ncomp) if j != halo_idx]
-        Cbase = np.zeros(npix_k, float)
-        for j in non_halo:
-            Cbase += f0[j] * mu[j]
+    tighten_negative_bounds = bool(args.tighten_negative_bounds)
+    if args.tighten_halo_neg_bound is not None:
+        tighten_negative_bounds = bool(args.tighten_halo_neg_bound)
 
-        lo_safe = tighten_negative_bound_for_single_halo(mu_halo=mu[halo_idx], Cbase=Cbase, safety=0.999)
-        lo, hi = bnds[halo_idx]
-        bnds[halo_idx] = (max(lo, lo_safe), hi)
-        print(f"\n  Tightened halo lower bound: {labels[halo_idx]} lo={bnds[halo_idx][0]:.6e} (was {lo})")
+    if tighten_negative_bounds:
+        neg_idxs = []
+        for j, lab in enumerate(labels):
+            key = str(lab).lower()
+            if any(str(nk).lower() in key for nk in negative_keys):
+                neg_idxs.append(j)
+
+        if len(neg_idxs) == 0:
+            print("\n  [INFO] No negative-allowed components identified; skipping negative-bound tightening.")
+        else:
+            print("\n  Tightening negative bounds (Cexp>0 safety)...")
+            for jneg in neg_idxs:
+                # mu is in cell space (ncomp, ncells_kept). Tighten bounds in the same space.
+                Cbase = np.zeros(int(mu.shape[1]), float)
+                for j in range(ncomp):
+                    if j == jneg:
+                        continue
+                    Cbase += f0[j] * mu[j]
+
+                lo_safe = tighten_negative_bound_for_single_halo(mu_halo=mu[jneg], Cbase=Cbase, safety=0.999)
+                lo, hi = bnds[jneg]
+                bnds[jneg] = (max(lo, lo_safe), hi)
+                print(f"    {labels[jneg]}: lo={bnds[jneg][0]:.6e} (was {lo})")
 
     print("\n  Bounds:")
     for lab, (lo, hi) in zip(labels, bnds):
@@ -524,6 +729,16 @@ def main():
         nsteps=args.nsteps,
         burn=args.burn,
         thin=args.thin,
+        require_autocorr=bool(args.require_autocorr),
+        early_stop=bool(args.early_stop),
+        autocorr_target=float(args.autocorr_target),
+        autocorr_check_every=int(args.autocorr_check_every),
+        autocorr_min_steps=int(args.autocorr_min_steps),
+        iso_prior_sigma_dex=args.iso_prior_sigma_dex,
+        iso_prior_mode=str(args.iso_prior_mode),
+        iso_prior_center=iso_center,
+        nonstable_prior_sigma_dex=args.nonstable_prior_sigma,
+        nonstable_prior_centers=nonstable_centers,
         init_jitter_frac=1e-3
     )
     dt = time.time() - t0
@@ -556,47 +771,100 @@ def main():
         print(f"  {lab:50s}: {val:+.6e}")
     print("=" * 60)
 
-    # ---- Save results
+    cancellation_diag = None
+    if bool(args.cancellation_check):
+        cancellation_diag = cancellation_check(
+            k=k,
+            counts=counts,
+            tpl_list=mu_list,
+            labels=labels,
+            coeff_k=res.f_ml,
+            mask_k=mask_k,
+        )
+
+    # ---- Save results (compressed, minimal by default)
     outfile = os.path.join(args.outdir, f"mcmc_results_k{k:02d}.npz")
-    np.savez(
-        outfile,
-        labels=res.labels,
-        f_ml=res.f_ml,
-        f_p16=res.f_p16,
-        f_p50=res.f_p50,
-        f_p84=res.f_p84,
-        loglike_ml=res.loglike_ml,
-        chain=res.chain,
-        logprob=res.logprob,
-        acceptance_fraction=res.acceptance_fraction,
-        used_emcee=res.used_emcee,
-        energy_bin=k,
-        Ectr_mev=Ectr_k,
-        iso_target_e2=args.iso_target_e2,
-    )
+    outfile_tmp = outfile + ".tmp"
+    
+    # Build save dict with essential arrays (downcast to float32 to save space)
+    save_dict = {
+        "labels": res.labels,
+        "f_ml": res.f_ml.astype(np.float32),
+        "f_p16": res.f_p16.astype(np.float32),
+        "f_p50": res.f_p50.astype(np.float32),
+        "f_p84": res.f_p84.astype(np.float32),
+        "loglike_ml": np.float32(res.loglike_ml),
+        "acceptance_fraction": res.acceptance_fraction.astype(np.float32),
+        "used_emcee": res.used_emcee,
+        "energy_bin": k,
+        "Ectr_mev": np.float32(Ectr_k),
+        "iso_target_e2": np.float32(args.iso_target_e2) if args.iso_target_e2 is not None else None,
+    }
+    
+    # Optionally save chain/logprob (thinned to reduce file size)
+    if args.save_chain:
+        chain_thinned = res.chain[::args.thin_save, :, :].astype(np.float32)
+        save_dict["chain"] = chain_thinned
+        print(f"  Saving chain: {chain_thinned.shape} (thinned by {args.thin_save})")
+    
+    if args.save_logprob:
+        logprob_thinned = res.logprob[::args.thin_save, :].astype(np.float32)
+        save_dict["logprob"] = logprob_thinned
+        print(f"  Saving logprob: {logprob_thinned.shape} (thinned by {args.thin_save})")
+    
+    try:
+        if os.path.exists(outfile_tmp):
+            os.remove(outfile_tmp)
+        np.savez_compressed(outfile_tmp, **save_dict)
+        os.replace(outfile_tmp, outfile)
+    finally:
+        if os.path.exists(outfile_tmp):
+            try:
+                os.remove(outfile_tmp)
+            except Exception:
+                pass
     print(f"\nResults saved to: {outfile}")
 
     # ---- Save text summary
     txtfile = os.path.join(args.outdir, f"mcmc_results_k{k:02d}.txt")
-    with open(txtfile, "w") as f:
-        f.write("MCMC Fit Results\n")
-        f.write(f"Energy bin: k={k}, E_ctr={Ectr_k:.1f} MeV ({Ectr_k/1000:.3f} GeV)\n")
-        f.write(f"Components: {', '.join(labels)}\n")
-        f.write(f"MCMC: {args.nwalkers} walkers, {args.nsteps} steps, burn={args.burn}, thin={args.thin}\n")
-        f.write(f"Used emcee: {res.used_emcee}\n")
-        f.write(f"iso init target E^2 dN/dE: {args.iso_target_e2:.6e}\n")
-        f.write(f"Acceptance fraction: mean={res.acceptance_fraction.mean():.3f}\n")
-        f.write(f"Log-likelihood (ML): {res.loglike_ml:.3f}\n\n")
-        f.write(f"{'Component':<50s}  {'ML':>12s}  {'p16':>12s}  {'p50':>12s}  {'p84':>12s}\n")
-        f.write("-" * 100 + "\n")
-        for i, lab in enumerate(res.labels):
-            f.write(f"{lab:<50s}  {res.f_ml[i]:+12.6e}  {res.f_p16[i]:+12.6e}  "
-                    f"{res.f_p50[i]:+12.6e}  {res.f_p84[i]:+12.6e}\n")
+    txtfile_tmp = txtfile + ".tmp"
+    try:
+        if os.path.exists(txtfile_tmp):
+            os.remove(txtfile_tmp)
+        with open(txtfile_tmp, "w") as f:
+            f.write("MCMC Fit Results\n")
+            f.write(f"Energy bin: k={k}, E_ctr={Ectr_k:.1f} MeV ({Ectr_k/1000:.3f} GeV)\n")
+            f.write(f"Components: {', '.join(labels)}\n")
+            f.write(f"MCMC: {args.nwalkers} walkers, {args.nsteps} steps, burn={args.burn}, thin={args.thin}\n")
+            f.write(f"Used emcee: {res.used_emcee}\n")
+            f.write(f"iso init target E^2 dN/dE: {args.iso_target_e2:.6e}\n")
+            f.write(f"Acceptance fraction: mean={res.acceptance_fraction.mean():.3f}\n")
+            f.write(f"Log-likelihood (ML): {res.loglike_ml:.3f}\n\n")
+            f.write(f"{'Component':<50s}  {'ML':>12s}  {'p16':>12s}  {'p50':>12s}  {'p84':>12s}\n")
+            f.write("-" * 100 + "\n")
+            for i, lab in enumerate(res.labels):
+                f.write(f"{lab:<50s}  {res.f_ml[i]:+12.6e}  {res.f_p16[i]:+12.6e}  "
+                        f"{res.f_p50[i]:+12.6e}  {res.f_p84[i]:+12.6e}\n")
+
+            if cancellation_diag is not None:
+                f.write("\n")
+                for line in cancellation_diag.get("lines", []):
+                    f.write(str(line) + "\n")
+        os.replace(txtfile_tmp, txtfile)
+    finally:
+        if os.path.exists(txtfile_tmp):
+            try:
+                os.remove(txtfile_tmp)
+            except Exception:
+                pass
     print(f"Summary saved to: {txtfile}\n")
 
     # ---- Plots
-    print("Generating diagnostic plots...")
-    plot_mcmc_results(res, args.outdir, k, Ectr_k, burn_for_plots=args.burn)
+    if bool(args.no_plots):
+        print("Skipping diagnostic plots (--no-plots).")
+    else:
+        print("Generating diagnostic plots...")
+        plot_mcmc_results(res, args.outdir, k, Ectr_k, burn_for_plots=args.burn)
     print("\nAll done!")
 
 
