@@ -134,6 +134,8 @@ def main():
     # --- ROI mask ---
     roi2d = (np.abs(lon) <= args.roi_lon) & (np.abs(lat) <= args.roi_lat)
 
+    fit2d = roi2d
+
     print("[units debug] omega median:", np.nanmedian(omega[roi2d]))
     print("[units debug] dE_mev min/median/max:", np.min(dE_mev), np.median(dE_mev), np.max(dE_mev))
 
@@ -187,6 +189,8 @@ def main():
     
 
     if args.debug:
+        vals = T[fit2d]
+        vals = vals[np.isfinite(vals) & (vals > 0)]
         fit_vals_all = T[fit2d]
         fit_vals_all = fit_vals_all[np.isfinite(fit_vals_all)]
         print("[LoopI debug] Pre-normalization morphology stats")

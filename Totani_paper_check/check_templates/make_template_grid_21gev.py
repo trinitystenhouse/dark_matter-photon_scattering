@@ -2,6 +2,8 @@
 
 import argparse
 import os
+import json
+import subprocess
 from typing import List, Tuple
 
 import numpy as np
@@ -58,6 +60,50 @@ def _corr_matrix(templates_2d: List[np.ndarray], mask2d: np.ndarray) -> np.ndarr
         vecs.append((vv - mu) / sig)
     X = np.vstack(vecs)
     return np.corrcoef(X)
+
+
+def _maybe_git_hash(repo_dir: str) -> str | None:
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_dir),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        s = (r.stdout or "").strip()
+        return s if s else None
+    except Exception:
+        return None
+
+
+def _autodetect_ics_subcomponents(templates_dir: str) -> List[Tuple[str, str]]:
+    """Return a list of (name, path) for any recognized ICS subcomponent templates.
+
+    This is intentionally conservative: it only adds items if the file exists.
+    """
+    out: List[Tuple[str, str]] = []
+    candidates = {
+        "ics_opt": [
+            "mu_ics_opt_counts.fits",
+            "mu_ics_optical_counts.fits",
+        ],
+        "ics_ir": [
+            "mu_ics_ir_counts.fits",
+            "mu_ics_infrared_counts.fits",
+        ],
+        "ics_cmb": [
+            "mu_ics_cmb_counts.fits",
+        ],
+    }
+
+    for key, fnames in candidates.items():
+        for fn in fnames:
+            p = os.path.join(str(templates_dir), fn)
+            if os.path.exists(p):
+                out.append((key, p))
+                break
+    return out
 
 
 def main():
@@ -127,6 +173,10 @@ def main():
     if args.ics_cmb:
         items.append(("ics_cmb", str(args.ics_cmb)))
 
+    # If not explicitly provided, attempt to autodetect common filenames.
+    if (not args.ics_opt) and (not args.ics_ir) and (not args.ics_cmb):
+        items.extend(_autodetect_ics_subcomponents(str(args.templates_dir)))
+
     names: List[str] = []
     maps: List[np.ndarray] = []
 
@@ -144,6 +194,26 @@ def main():
         raise SystemExit("No templates found to plot.")
 
     os.makedirs(args.outdir, exist_ok=True)
+
+    # Reproducibility outputs: dump config + cache intermediates.
+    cfg = {
+        "counts": str(args.counts),
+        "templates_dir": str(args.templates_dir),
+        "ext_mask": str(args.ext_mask),
+        "Egev_requested": float(args.Egev),
+        "Egev_selected": float(Ectr_gev[k]),
+        "k_selected": int(k),
+        "roi_lon": float(args.roi_lon),
+        "roi_lat": float(args.roi_lat),
+        "disk_cut": float(args.disk_cut),
+        "halo_label": str(args.halo_label),
+        "mask2d_npix": int(np.sum(mask2d)),
+        "inputs": [{"name": n, "path": p} for (n, p) in items],
+        "git_hash": _maybe_git_hash(str(repo_dir)),
+    }
+    out_cfg = os.path.join(args.outdir, f"template_grid_E{Ectr_gev[k]:.2f}GeV_config.json")
+    with open(out_cfg, "w") as f:
+        json.dump(cfg, f, indent=2, sort_keys=True)
 
     n = len(maps)
     ncol = 3
@@ -183,6 +253,18 @@ def main():
     fig.savefig(out_png, dpi=220)
     plt.close(fig)
     print("✓ wrote", out_png)
+
+    out_cache = os.path.join(args.outdir, f"template_grid_E{Ectr_gev[k]:.2f}GeV_cache.npz")
+    np.savez_compressed(
+        out_cache,
+        names=np.asarray(names, dtype=object),
+        k=np.int32(k),
+        Egev=np.float32(Ectr_gev[k]),
+        mask2d=mask2d.astype(np.uint8),
+        corr=C.astype(np.float32),
+    )
+    print("✓ wrote", out_cache)
+    print("✓ wrote", out_cfg)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,11 @@ from astropy.wcs import WCS
 import matplotlib.pyplot as plt
 import time
 
+try:
+    from tqdm import tqdm  # type: ignore
+except Exception:  # pragma: no cover
+    tqdm = None
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from totani_helpers.totani_io import (
     lonlat_grids,
@@ -106,6 +111,7 @@ def build_totani_init_for_mu_counts(
     denom_vec,      # (npix,) expo*omega*dE for same pixels
     Ectr_mev,
     iso_target_E2=1e-4,  # If None, iso starts at f=1 like other physical templates
+    verbosity: int = 2,
 ):
     """
     Totani text says:
@@ -130,10 +136,11 @@ def build_totani_init_for_mu_counts(
             E2I, I_med = _infer_E2dNdE_for_iso_at_f1(mu[jiso], denom_vec, Ectr_mev)
             f0[jiso] = iso_target_E2 / E2I
 
-            print("\nIsotropic init conversion (legacy mode):")
-            print(f"  iso at f=1 implies E^2 dN/dE = {E2I:.6e}  [MeV cm^-2 s^-1 sr^-1]")
-            print(f"  target E^2 dN/dE           = {iso_target_E2:.6e}")
-            print(f"  ==> set f_iso_init         = {f0[jiso]:.6e}")
+            if int(verbosity) >= 2:
+                print("\nIsotropic init conversion (legacy mode):")
+                print(f"  iso at f=1 implies E^2 dN/dE = {E2I:.6e}  [MeV cm^-2 s^-1 sr^-1]")
+                print(f"  target E^2 dN/dE           = {iso_target_E2:.6e}")
+                print(f"  ==> set f_iso_init         = {f0[jiso]:.6e}")
 
     # all other components: start at 0 (already)
 
@@ -161,7 +168,7 @@ def tighten_negative_bound_for_single_halo(*, mu_halo, Cbase, safety=0.999):
 # -----------------------------------------------------------------------------
 # Plotting (same as yours, but burn uses args.burn)
 # -----------------------------------------------------------------------------
-def plot_mcmc_results(res, outdir, energy_bin, Ectr_mev, burn_for_plots=None):
+def plot_mcmc_results(res, outdir, energy_bin, Ectr_mev, burn_for_plots=None, *, verbosity: int = 2):
     labels = res.labels
     ncomp = len(labels)
     chain = res.chain  # (nsteps, nwalkers, ncomp)
@@ -193,7 +200,8 @@ def plot_mcmc_results(res, outdir, energy_bin, Ectr_mev, burn_for_plots=None):
     trace_file = os.path.join(outdir, f"mcmc_trace_k{energy_bin:02d}.png")
     fig_trace.savefig(trace_file, dpi=150, bbox_inches="tight")
     plt.close(fig_trace)
-    print(f"  Trace plot saved to: {trace_file}")
+    if int(verbosity) >= 2:
+        print(f"  Trace plot saved to: {trace_file}")
 
     # 2) Hist
     ncols = min(3, ncomp)
@@ -221,7 +229,8 @@ def plot_mcmc_results(res, outdir, energy_bin, Ectr_mev, burn_for_plots=None):
     hist_file = os.path.join(outdir, f"mcmc_posteriors_k{energy_bin:02d}.png")
     fig_hist.savefig(hist_file, dpi=150, bbox_inches="tight")
     plt.close(fig_hist)
-    print(f"  Posterior plot saved to: {hist_file}")
+    if int(verbosity) >= 2:
+        print(f"  Posterior plot saved to: {hist_file}")
 
     # 3) Corner (optional)
     try:
@@ -249,9 +258,11 @@ def plot_mcmc_results(res, outdir, energy_bin, Ectr_mev, burn_for_plots=None):
         corner_file = os.path.join(outdir, f"mcmc_corner_k{energy_bin:02d}.png")
         fig_corner.savefig(corner_file, dpi=150, bbox_inches="tight")
         plt.close(fig_corner)
-        print(f"  Corner plot saved to: {corner_file}")
+        if int(verbosity) >= 2:
+            print(f"  Corner plot saved to: {corner_file}")
     except ImportError:
-        print("  Corner package not available, skipping corner plot")
+        if int(verbosity) >= 2:
+            print("  Corner package not available, skipping corner plot")
 
     # 4) Acceptance
     fig_acc, ax = plt.subplots(1, 1, figsize=(8, 4))
@@ -267,10 +278,11 @@ def plot_mcmc_results(res, outdir, energy_bin, Ectr_mev, burn_for_plots=None):
     acc_file = os.path.join(outdir, f"mcmc_acceptance_k{energy_bin:02d}.png")
     fig_acc.savefig(acc_file, dpi=150, bbox_inches="tight")
     plt.close(fig_acc)
-    print(f"  Acceptance plot saved to: {acc_file}")
+    if int(verbosity) >= 2:
+        print(f"  Acceptance plot saved to: {acc_file}")
 
 
-def cancellation_check(k, counts, tpl_list, labels, coeff_k, mask_k):
+def cancellation_check(k, counts, tpl_list, labels, coeff_k, mask_k, *, verbosity: int = 2):
     y = float(np.nansum(counts[k][mask_k]))
 
     comp_sums = {}
@@ -299,7 +311,8 @@ def cancellation_check(k, counts, tpl_list, labels, coeff_k, mask_k):
     for lab, v in sorted(comp_sums.items(), key=lambda kv: abs(kv[1]), reverse=True)[:6]:
         lines.append(f"    {lab:20s}  {v:+.3e}")
 
-    print("\n" + "\n".join(lines))
+    if int(verbosity) >= 2:
+        print("\n" + "\n".join(lines))
 
     return {"comp_sums": comp_sums, "lines": lines}
 
@@ -374,6 +387,21 @@ def main():
     ap.add_argument("--iso-target-e2", type=float, default=1e-4,
                     help="Optional: rescale iso init to this target E^2 dN/dE [MeV cm^-2 s^-1 sr^-1]. If not set, iso starts at f=1 (recommended for physical templates).")
     ap.add_argument(
+        "--iso-anchor-e2",
+        type=float,
+        default=1e-4,
+        help=(
+            "Anchor the isotropic prior center to this E^2 dN/dE value [MeV cm^-2 s^-1 sr^-1] by converting "
+            "to the corresponding f_iso for each energy bin."
+        ),
+    )
+    ap.add_argument(
+        "--iso-anchor",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="Enable/disable anchoring the isotropic prior center to --iso-anchor-e2 (default: enabled).",
+    )
+    ap.add_argument(
         "--iso-prior-sigma-dex",
         type=float,
         default=0.5,
@@ -382,7 +410,7 @@ def main():
     ap.add_argument(
         "--iso-prior-mode",
         choices=["f", "f_upper"],
-        default="f_upper",
+        default="f",
         help=(
             "Iso prior mode. 'f' is a symmetric log-prior centered on Totani init f0. "
             "'f_upper' anchors the starting value but only penalizes excursions above f0 (allows drifting down)."
@@ -432,6 +460,12 @@ def main():
         help="Skip diagnostic plot generation (useful for long batch runs).",
     )
     ap.add_argument(
+        "--progress",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="Show a tqdm progress bar during the emcee MCMC run (if emcee is available).",
+    )
+    ap.add_argument(
         "--cancellation-check",
         action="store_true",
         help="Print per-bin diagnostic showing positive/negative component cancellations and mu_pix positivity using ML coefficients.",
@@ -460,7 +494,24 @@ def main():
                     help="Save MCMC logprob array (can be large; off by default to save disk space).")
     ap.add_argument("--thin-save", type=int, default=10,
                     help="Thinning factor for saved chain/logprob (default 10 to reduce file size).")
+
+    ap.add_argument(
+        "--verbosity",
+        type=int,
+        default=1,
+        choices=[0, 1, 2],
+        help=(
+            "Verbosity level: 0 prints nothing; 1 prints only wall time + fit config + output paths (default); "
+            "2 prints all diagnostics."
+        ),
+    )
     args = ap.parse_args()
+
+    verbosity = int(args.verbosity)
+
+    def vprint(level: int, *p, **k):
+        if verbosity >= int(level):
+            print(*p, **k)
 
     os.makedirs(args.outdir, exist_ok=True)
 
@@ -498,24 +549,32 @@ def main():
     _seen = set()
     negative_keys = [k for k in negative_keys if (k not in _seen and not _seen.add(k))]
 
-    print("=" * 60)
-    print("MCMC Fit Configuration")
-    print("=" * 60)
-    print(f"Components: {labels}")
-    print(f"Negative keys: {negative_keys}")
-    print(f"Energy bin: {args.energy_bin}")
-    print(f"MCMC: {args.nwalkers} walkers, {args.nsteps} steps, burn={args.burn}, thin={args.thin}")
-    print(f"iso init target: E^2 dN/dE = {args.iso_target_e2:.3e}")
-    print("=" * 60)
+    if verbosity >= 2:
+        print("=" * 60)
+        print("MCMC Fit Configuration")
+        print("=" * 60)
+        print(f"Components: {labels}")
+        print(f"Negative keys: {negative_keys}")
+        print(f"Energy bin: {args.energy_bin}")
+        print(f"MCMC: {args.nwalkers} walkers, {args.nsteps} steps, burn={args.burn}, thin={args.thin}")
+        print(f"iso init target: E^2 dN/dE = {args.iso_target_e2:.3e}")
+        print("=" * 60)
 
     # ---- Load counts + EBOUNDS
-    print("\nLoading data...")
+    pbar = None
+    if (verbosity > 0) and (tqdm is not None):
+        pbar = tqdm(total=4, desc="Loading FITS")
+
     counts, hdr, Emin, Emax, Ectr_mev, dE_mev = read_counts_and_ebounds(args.counts)
     nE, ny, nx = counts.shape
     wcs = WCS(hdr).celestial
-    print(f"  Counts cube: {counts.shape} (nE={nE}, ny={ny}, nx={nx})")
-    print(f"  Energy bins: {len(Ectr_mev)}")
-    print(f"  Energy range: {Emin[0]:.1f} - {Emax[-1]:.1f} MeV")
+    if pbar is not None:
+        pbar.update(1)
+    if verbosity >= 2:
+        print(f"  Counts cube: {counts.shape} (nE={nE}, ny={ny}, nx={nx})")
+    if verbosity >= 2:
+        print(f"  Energy bins: {len(Ectr_mev)}")
+        print(f"  Energy range: {Emin[0]:.1f} - {Emax[-1]:.1f} MeV")
 
     # ---- Exposure
     expo_raw, E_expo_mev = read_exposure(args.expo)
@@ -524,11 +583,13 @@ def main():
     expo = resample_exposure_logE(expo_raw, E_expo_mev, Ectr_mev)
     if expo.shape[0] != nE:
         raise RuntimeError("Exposure resampling did not produce same nE as counts")
-    print(f"  Exposure: {expo.shape}")
+    if pbar is not None:
+        pbar.update(1)
+    vprint(2, f"  Exposure: {expo.shape}")
 
     # ---- Solid angle map
     omega = pixel_solid_angle_map(wcs, ny, nx, args.binsz)
-    print(f"  Solid angle map: {omega.shape}")
+    vprint(2, f"  Solid angle map: {omega.shape}")
 
     # ---- Lon/lat and ROI
     lon, lat = lonlat_grids(wcs, ny, nx)
@@ -536,7 +597,7 @@ def main():
     if args.exclude_disk:
         roi2d = roi2d & (np.abs(lat) >= float(args.disk_cut))
     disk_tag = f"excluded |b|<{float(args.disk_cut):g}°" if args.exclude_disk else "disk included"
-    print(f"  ROI: |l|<={args.roi_lon}°, |b|<={args.roi_lat}° ({disk_tag})  (pixels {roi2d.sum()}/{roi2d.size})")
+    vprint(2, f"  ROI: |l|<={args.roi_lon}°, |b|<={args.roi_lat}° ({disk_tag})  (pixels {roi2d.sum()}/{roi2d.size})")
 
     # ---- Cell IDs for Totani-style cellwise likelihood
     cell_id_map = build_cell_id_map(lon=lon, lat=lat, roi_lon=args.roi_lon, roi_lat=args.roi_lat, cell_deg=args.cell_deg)
@@ -554,19 +615,28 @@ def main():
             ) from e
         srcmask &= ext_keep3d
         frac_masked = float(np.mean((~ext_keep3d)[:, roi2d])) if np.any(roi2d) else float("nan")
-        print(f"  Extended-source mask applied (masked frac in ROI={frac_masked:.4f})")
+        vprint(2, f"  Extended-source mask applied (masked frac in ROI={frac_masked:.4f})")
+
+    if pbar is not None:
+        pbar.update(1)
 
     # ---- Load templates
-    print("\nLoading templates...")
     mu_list, headers = load_mu_templates_from_fits(
         template_dir=args.templates_dir,
         labels=labels,
         filename_pattern="mu_{label}_counts.fits",
         hdu=0,
+        progress=bool(verbosity > 0),
+        progress_desc="Loading templates",
     )
-    print(f"  Loaded {len(mu_list)} templates")
-    for i, lab in enumerate(labels):
-        print(f"    {lab}: {mu_list[i].shape}")
+    if pbar is not None:
+        pbar.update(1)
+        pbar.close()
+
+    vprint(2, f"\nLoaded {len(mu_list)} templates")
+    if verbosity >= 2:
+        for i, lab in enumerate(labels):
+            print(f"    {lab}: {mu_list[i].shape}")
 
     # ---- Fit mask
     fit_mask3d = build_fit_mask3d(
@@ -583,7 +653,16 @@ def main():
     Ectr_k = float(np.asarray(Ectr_mev).reshape(-1)[k])
     dE_k = float(np.asarray(dE_mev).reshape(-1)[k])
 
-    print(f"\nFitting energy bin k={k}, E_ctr={Ectr_k:.1f} MeV ({Ectr_k/1000:.3f} GeV)")
+    if verbosity >= 1:
+        print("\nFit config:")
+        print(f"  outdir: {args.outdir}")
+        print(f"  templates_dir: {args.templates_dir}")
+        print(f"  energy bin: k={k}, E_ctr={Ectr_k:.1f} MeV ({Ectr_k/1000:.3f} GeV)")
+        print(f"  labels: {', '.join(labels)}")
+        print(f"  nwalkers={args.nwalkers} nsteps={args.nsteps} burn={args.burn} thin={args.thin}")
+        print(f"  early_stop={bool(args.early_stop)} require_autocorr={bool(args.require_autocorr)}")
+        print(f"  iso_anchor={bool(args.iso_anchor)} iso_anchor_e2={args.iso_anchor_e2}")
+        print(f"  iso_prior_mode={str(args.iso_prior_mode)} iso_prior_sigma_dex={args.iso_prior_sigma_dex}")
     mask_k = fit_mask3d[k]
 
     # Ensure we also exclude pixels where any template is non-finite in this bin.
@@ -595,26 +674,27 @@ def main():
     mask_k = mask_k & tmpl_ok
     n_after = int(np.count_nonzero(mask_k))
     if n_after != n_before:
-        print(f"  Mask tightened by template finiteness: {n_before} -> {n_after} pixels")
+        vprint(2, f"  Mask tightened by template finiteness: {n_before} -> {n_after} pixels")
 
     npix_k = int(mask_k.sum())
-    print(f"  Valid pixels in fit mask: {npix_k}")
+    vprint(2, f"  Valid pixels in fit mask: {npix_k}")
     if npix_k == 0:
         raise RuntimeError(f"No valid pixels in energy bin {k}")
 
     # ---- Norm report (your existing diagnostic)
-    print("\nTemplate normalisations (from mu_list):")
-    report_template_normalisations_from_mu_list(
-        counts_cube=counts,
-        mu_list=mu_list,
-        labels=labels,
-        fit_mask3d=fit_mask3d,
-        energy_bin=k,
-        Ectr_mev=Ectr_k,
-        expo_cube=expo,
-        omega_map=omega,
-        dE_mev=dE_k,
-    )
+    if verbosity >= 2:
+        print("\nTemplate normalisations (from mu_list):")
+        report_template_normalisations_from_mu_list(
+            counts_cube=counts,
+            mu_list=mu_list,
+            labels=labels,
+            fit_mask3d=fit_mask3d,
+            energy_bin=k,
+            Ectr_mev=Ectr_k,
+            expo_cube=expo,
+            omega_map=omega,
+            dE_mev=dE_k,
+        )
 
     # ---- Cellwise vectors for Totani-style likelihood
     # Observed counts aggregated into 10°x10° cells
@@ -625,11 +705,12 @@ def main():
         ncells=144,
     )
     cell_keep = npix_cells > 0
-    print("\nCell occupancy (npix per cell):")
-    print(npix_cells.reshape(12, 12))
+    if verbosity >= 2:
+        print("\nCell occupancy (npix per cell):")
+        print(npix_cells.reshape(12, 12))
 
     Cobs = Cobs_cells[cell_keep].astype(float)
-    print(f"\n  Cobs_cells: shape={Cobs.shape}, sum={Cobs.sum():.1f}, mean={Cobs.mean():.3f}")
+    vprint(2, f"\n  Cobs_cells: shape={Cobs.shape}, sum={Cobs.sum():.1f}, mean={Cobs.mean():.3f}")
 
     # Build mu_cells (ncomp, ncells_kept)
     ncomp = len(labels)
@@ -642,7 +723,7 @@ def main():
             ncells=144,
         )
         mu_cells_full[j, :] = mu_j_cells
-        print(f"  mu_cells[{lab}]: sum={mu_j_cells.sum():.3e}")
+        vprint(2, f"  mu_cells[{lab}]: sum={mu_j_cells.sum():.3e}")
 
     mu = mu_cells_full[:, cell_keep].astype(float)
 
@@ -657,15 +738,16 @@ def main():
     denom_vec = denom_cells[cell_keep].astype(float)
 
     # ---- Initialize parameters (THIS is the critical change)
-    print("\nInitializing MCMC (Totani-style, consistent with your mu counts templates)...")
     f0 = build_totani_init_for_mu_counts(
         labels=labels,
         mu=mu,
         denom_vec=denom_vec,
         Ectr_mev=Ectr_k,
         iso_target_E2=args.iso_target_e2,
+        verbosity=verbosity,
     )
-    print(f"  Initial values: {dict(zip(labels, f0))}")
+    vprint(2, "\nInitializing MCMC (Totani-style, consistent with your mu counts templates)...")
+    vprint(2, f"  Initial values: {dict(zip(labels, f0))}")
 
     # Prior centers (Totani init values)
     labels_l = [str(x).lower() for x in labels]
@@ -678,6 +760,20 @@ def main():
         if key in labels_l:
             iso_center = float(f0[labels_l.index(key)])
             break
+
+    if bool(args.iso_anchor) and (args.iso_anchor_e2 is not None):
+        jiso = None
+        for key in ("iso", "isotropic"):
+            if key in labels_l:
+                jiso = labels_l.index(key)
+                break
+        if jiso is not None:
+            # Convert target E^2 dN/dE to the corresponding f_iso center for this energy bin.
+            E2I, _I_med = _infer_E2dNdE_for_iso_at_f1(mu[jiso], denom_vec, Ectr_k)
+            if not np.isfinite(E2I) or (E2I <= 0):
+                raise RuntimeError("Cannot anchor iso prior: inferred E^2 dN/dE at f=1 is non-finite or non-positive.")
+            iso_center = float(args.iso_anchor_e2) / float(E2I)
+            vprint(2, f"[iso anchor] E2(f=1)={E2I:.6e}  anchor={float(args.iso_anchor_e2):.6e}  => iso_prior_center={iso_center:.6e}")
 
     # ---- Bounds
     bnds = totani_bounds(labels, negative_keys=tuple(negative_keys))
@@ -694,9 +790,9 @@ def main():
                 neg_idxs.append(j)
 
         if len(neg_idxs) == 0:
-            print("\n  [INFO] No negative-allowed components identified; skipping negative-bound tightening.")
+            vprint(2, "\n  [INFO] No negative-allowed components identified; skipping negative-bound tightening.")
         else:
-            print("\n  Tightening negative bounds (Cexp>0 safety)...")
+            vprint(2, "\n  Tightening negative bounds (Cexp>0 safety)...")
             for jneg in neg_idxs:
                 # mu is in cell space (ncomp, ncells_kept). Tighten bounds in the same space.
                 Cbase = np.zeros(int(mu.shape[1]), float)
@@ -708,16 +804,17 @@ def main():
                 lo_safe = tighten_negative_bound_for_single_halo(mu_halo=mu[jneg], Cbase=Cbase, safety=0.999)
                 lo, hi = bnds[jneg]
                 bnds[jneg] = (max(lo, lo_safe), hi)
-                print(f"    {labels[jneg]}: lo={bnds[jneg][0]:.6e} (was {lo})")
+                vprint(2, f"    {labels[jneg]}: lo={bnds[jneg][0]:.6e} (was {lo})")
 
-    print("\n  Bounds:")
-    for lab, (lo, hi) in zip(labels, bnds):
-        lo_str = f"{lo:.3e}" if np.isfinite(lo) else "-inf"
-        hi_str = f"{hi:.3e}" if np.isfinite(hi) else "+inf"
-        print(f"    {lab}: [{lo_str}, {hi_str}]")
+    if verbosity >= 2:
+        print("\n  Bounds:")
+        for lab, (lo, hi) in zip(labels, bnds):
+            lo_str = f"{lo:.3e}" if np.isfinite(lo) else "-inf"
+            hi_str = f"{hi:.3e}" if np.isfinite(hi) else "+inf"
+            print(f"    {lab}: [{lo_str}, {hi_str}]")
 
     # ---- Run MCMC
-    print("\nRunning MCMC...")
+    vprint(2, "\nRunning MCMC...")
     t0 = time.time()
     res = totani_mcmc_fit(
         Cobs=Cobs,
@@ -739,37 +836,43 @@ def main():
         iso_prior_center=iso_center,
         nonstable_prior_sigma_dex=args.nonstable_prior_sigma,
         nonstable_prior_centers=nonstable_centers,
-        init_jitter_frac=1e-3
+        init_jitter_frac=1e-3,
+        progress=bool(args.progress) and (verbosity > 0),
+        verbosity=verbosity,
     )
     dt = time.time() - t0
-    print(f"MCMC wall time: {dt:.2f} s  ({dt/60:.2f} min)")
-    print("acc per walker:", res.acceptance_fraction)
-    print("n dead:", np.sum(res.acceptance_fraction < 0.02))
+    if verbosity >= 1:
+        print(f"MCMC wall time: {dt:.2f} s  ({dt/60:.2f} min)")
+    vprint(2, "acc per walker:", res.acceptance_fraction)
+    vprint(2, "n dead:", np.sum(res.acceptance_fraction < 0.02))
 
-    print("\n" + "=" * 60)
-    print("MCMC Results")
-    print("=" * 60)
-    print(f"Used emcee: {res.used_emcee}")
-    print(f"Acceptance fraction: mean={res.acceptance_fraction.mean():.3f}, "
-          f"min={res.acceptance_fraction.min():.3f}, max={res.acceptance_fraction.max():.3f}")
-    print(f"Log-likelihood (ML): {res.loglike_ml:.3f}")
+    if verbosity >= 2:
+        print("\n" + "=" * 60)
+        print("MCMC Results")
+        print("=" * 60)
+        print(f"Used emcee: {res.used_emcee}")
+        print(
+            f"Acceptance fraction: mean={res.acceptance_fraction.mean():.3f}, "
+            f"min={res.acceptance_fraction.min():.3f}, max={res.acceptance_fraction.max():.3f}"
+        )
+        print(f"Log-likelihood (ML): {res.loglike_ml:.3f}")
 
-    print("\nMaximum Likelihood:")
-    for lab, val in zip(res.labels, res.f_ml):
-        print(f"  {lab:50s}: {val:+.6e}")
+        print("\nMaximum Likelihood:")
+        for lab, val in zip(res.labels, res.f_ml):
+            print(f"  {lab:50s}: {val:+.6e}")
 
-    print("\nMedian (50th percentile):")
-    for lab, val in zip(res.labels, res.f_p50):
-        print(f"  {lab:50s}: {val:+.6e}")
+        print("\nMedian (50th percentile):")
+        for lab, val in zip(res.labels, res.f_p50):
+            print(f"  {lab:50s}: {val:+.6e}")
 
-    print("\n16th percentile:")
-    for lab, val in zip(res.labels, res.f_p16):
-        print(f"  {lab:50s}: {val:+.6e}")
+        print("\n16th percentile:")
+        for lab, val in zip(res.labels, res.f_p16):
+            print(f"  {lab:50s}: {val:+.6e}")
 
-    print("\n84th percentile:")
-    for lab, val in zip(res.labels, res.f_p84):
-        print(f"  {lab:50s}: {val:+.6e}")
-    print("=" * 60)
+        print("\n84th percentile:")
+        for lab, val in zip(res.labels, res.f_p84):
+            print(f"  {lab:50s}: {val:+.6e}")
+        print("=" * 60)
 
     cancellation_diag = None
     if bool(args.cancellation_check):
@@ -780,6 +883,7 @@ def main():
             labels=labels,
             coeff_k=res.f_ml,
             mask_k=mask_k,
+            verbosity=verbosity,
         )
 
     # ---- Save results (compressed, minimal by default)
@@ -807,12 +911,12 @@ def main():
     if args.save_chain:
         chain_thinned = res.chain[::args.thin_save, :, :].astype(np.float32)
         save_dict["chain"] = chain_thinned
-        print(f"  Saving chain: {chain_thinned.shape} (thinned by {args.thin_save})")
+        vprint(2, f"  Saving chain: {chain_thinned.shape} (thinned by {args.thin_save})")
     
     if args.save_logprob:
         logprob_thinned = res.logprob[::args.thin_save, :].astype(np.float32)
         save_dict["logprob"] = logprob_thinned
-        print(f"  Saving logprob: {logprob_thinned.shape} (thinned by {args.thin_save})")
+        vprint(2, f"  Saving logprob: {logprob_thinned.shape} (thinned by {args.thin_save})")
     
     try:
         if os.path.exists(outfile_tmp):
@@ -825,7 +929,8 @@ def main():
                 os.remove(outfile_tmp)
             except Exception:
                 pass
-    print(f"\nResults saved to: {outfile}")
+    if verbosity >= 1:
+        print(f"Results saved to: {outfile}")
 
     # ---- Save text summary
     txtfile = os.path.join(args.outdir, f"mcmc_results_k{k:02d}.txt")
@@ -859,15 +964,16 @@ def main():
                 os.remove(txtfile_tmp)
             except Exception:
                 pass
-    print(f"Summary saved to: {txtfile}\n")
+    if verbosity >= 1:
+        print(f"Summary saved to: {txtfile}\n")
 
     # ---- Plots
     if bool(args.no_plots):
-        print("Skipping diagnostic plots (--no-plots).")
+        vprint(2, "Skipping diagnostic plots (--no-plots).")
     else:
-        print("Generating diagnostic plots...")
-        plot_mcmc_results(res, args.outdir, k, Ectr_k, burn_for_plots=args.burn)
-    print("\nAll done!")
+        vprint(2, "Generating diagnostic plots...")
+        plot_mcmc_results(res, args.outdir, k, Ectr_k, burn_for_plots=args.burn, verbosity=verbosity)
+    vprint(2, "\nAll done!")
 
 
 if __name__ == "__main__":

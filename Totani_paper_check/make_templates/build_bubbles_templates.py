@@ -212,13 +212,9 @@ def main():
     ap.add_argument("--verts-south", default=os.path.join(here, "bubble_vertices_south.txt"))
     ap.add_argument(
         "--restrict-to-vertices",
-        action="store_true",
+        default=True,
+        action=argparse.BooleanOptionalAction,
         help="Restrict morphology iteration to the union of the north/south vertices-defined polygons.",
-    )
-    ap.add_argument(
-        "--no-restrict-to-vertices",
-        action="store_true",
-        help="Disable vertex polygon restriction.",
     )
 
     ap.add_argument(
@@ -293,12 +289,9 @@ def main():
     k_bins = _parse_energy_bins(args.energy_bins_for_bubbles, Ectr_mev)
     print(f"[bubbles] using k bins {k_bins} (Ectr_GeV={np.asarray(Ectr_mev)[k_bins]/1000.0})")
 
-    restrict_vertices = bool(args.restrict_to_vertices) and (not bool(args.no_restrict_to_vertices))
-    if restrict_vertices:
+    if bool(args.restrict_to_vertices):
         if (not os.path.exists(str(args.verts_north))) or (not os.path.exists(str(args.verts_south))):
-            raise SystemExit(
-                "Vertices file not found. Pass --no-restrict-to-vertices or set --verts-north/--verts-south."
-            )
+            raise SystemExit("Vertices file not found. Pass --no-restrict-to-vertices or set --verts-north/--verts-south.")
         verts_n = _read_vertices_lonlat(str(args.verts_north))
         verts_s = _read_vertices_lonlat(str(args.verts_south))
         boundary2d = _polygon_mask_from_lonlat_vertices(wcs, ny, nx, verts_n) | _polygon_mask_from_lonlat_vertices(

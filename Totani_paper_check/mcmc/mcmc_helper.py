@@ -166,7 +166,12 @@ def totani_mcmc_fit(
     init_jitter_frac: float = 1e-2,
     rng: Optional[np.random.Generator] = None,
     progress: bool = False,
+    verbosity: int = 2,
 ) -> MCMCResult:
+    def vprint(level: int, *args, **kwargs):
+        if int(verbosity) >= int(level):
+            print(*args, **kwargs)
+
     rng = rng or np.random.default_rng()
 
     Cobs = np.asarray(Cobs, dtype=float).reshape(-1)
@@ -323,7 +328,7 @@ def totani_mcmc_fit(
     # Final check
     lp0 = np.array([logprob_fn(p0[w]) for w in range(nwalkers)], dtype=float)
     n_bad = int(np.sum(~np.isfinite(lp0)))
-    print(f"Init walkers finite: {nwalkers - n_bad}/{nwalkers}  (respawned {len(bad_idx)})")
+    vprint(2, f"Init walkers finite: {nwalkers - n_bad}/{nwalkers}  (respawned {len(bad_idx)})")
     if n_bad:
         # It's safer to fail than to run with dead walkers.
         raise RuntimeError(f"{n_bad} walkers still have -inf logprob after respawn; check bounds/Cexp positivity.")
@@ -335,6 +340,45 @@ def totani_mcmc_fit(
     try:
         import emcee  # type: ignore
         used_emcee = True
+
+        heart_sample = None
+        try:
+            from helpers.heartbar import emcee_heart_sample as heart_sample  # type: ignore
+        except Exception:
+            heart_sample = None
+
+        def _run_emcee(initial_state, n_iter: int, *, do_progress: bool):
+            if bool(do_progress) and (heart_sample is not None):
+                last_state = None
+                for last_state in heart_sample(sampler, initial_state, nsteps=int(n_iter), desc="emcee"):
+                    pass
+                return last_state
+            return sampler.run_mcmc(initial_state, int(n_iter), progress=do_progress)
+
+        def _report_autocorr_status(*, n_done: int):
+            try:
+                tau = sampler.get_autocorr_time(tol=0)
+                n_over_tau = float(n_done) / tau
+                if np.any(~np.isfinite(n_over_tau)):
+                    raise RuntimeError(f"Non-finite N/tau encountered: {n_over_tau}")
+
+                ok = bool(np.all(n_over_tau >= float(autocorr_target)))
+                if int(verbosity) >= 2:
+                    vprint(2, "tau:", tau)
+                    vprint(2, "N/tau:", n_over_tau)
+
+                if int(verbosity) >= 1:
+                    min_not = float(np.min(n_over_tau))
+                    if ok:
+                        vprint(1, f"autocorr status: achieved (min N/tau={min_not:.3f} >= {float(autocorr_target):g})")
+                    else:
+                        vprint(1, f"autocorr status: NOT achieved (min N/tau={min_not:.3f} < {float(autocorr_target):g})")
+            except Exception as e:
+                if int(verbosity) >= 2:
+                    vprint(2, "autocorr time not available yet:", repr(e))
+                if int(verbosity) >= 1:
+                    vprint(1, "autocorr status: unavailable")
+
         sampler = emcee.EnsembleSampler(nwalkers, ncomp, logprob_fn)
         if early_stop:
             total = int(nsteps)
@@ -345,7 +389,7 @@ def totani_mcmc_fit(
 
             while n_done < total:
                 n_chunk = min(step, total - n_done)
-                state = sampler.run_mcmc(p0 if state is None else state, n_chunk, progress=progress)
+                state = _run_emcee(p0 if state is None else state, n_chunk, do_progress=progress)
                 n_done += int(n_chunk)
 
                 if n_done < min_steps:
@@ -359,9 +403,9 @@ def totani_mcmc_fit(
                     if np.any(~np.isfinite(n_over_tau)):
                         raise RuntimeError(f"Non-finite N/tau encountered: {n_over_tau}")
                     if bool(early_stop) and np.all(n_over_tau >= float(autocorr_target)):
-                        print("tau:", tau)
-                        print("N/tau:", n_over_tau)
-                        print(f"Early stop: reached N/tau >= {float(autocorr_target):g} for all params at N={n_done}")
+                        vprint(2, "tau:", tau)
+                        vprint(2, "N/tau:", n_over_tau)
+                        vprint(2, f"Early stop: reached N/tau >= {float(autocorr_target):g} for all params at N={n_done}")
                         break
                 except Exception as e:
                     if bool(require_autocorr):
@@ -370,19 +414,14 @@ def totani_mcmc_fit(
                     pass
 
             # Final report (best effort)
-            try:
-                tau = sampler.get_autocorr_time(tol=0)
-                print("tau:", tau)
-                print("N/tau:", n_done / tau)
-            except Exception as e:
-                print("autocorr time not available yet:", repr(e))
+            _report_autocorr_status(n_done=int(n_done))
         else:
-            sampler.run_mcmc(p0, nsteps, progress=progress)
+            _run_emcee(p0, nsteps, do_progress=progress)
             try:
                 tau = sampler.get_autocorr_time(tol=0)
-                print("tau:", tau)
+                vprint(2, "tau:", tau)
                 n_over_tau = nsteps / tau
-                print("N/tau:", n_over_tau)
+                vprint(2, "N/tau:", n_over_tau)
                 # Totani-style rule of thumb: require sufficiently many autocorrelation times.
                 # Enforce N/tau >= 50 for all parameters.
                 if np.any(~np.isfinite(n_over_tau)):
@@ -396,7 +435,9 @@ def totani_mcmc_fit(
             except Exception as e:
                 if bool(require_autocorr):
                     raise RuntimeError(f"Autocorr convergence check requested but failed: {repr(e)}") from e
-                print("autocorr time not available yet:", repr(e))
+                vprint(2, "autocorr time not available yet:", repr(e))
+
+            _report_autocorr_status(n_done=int(nsteps))
         chain = sampler.get_chain()
         logprob = sampler.get_log_prob()
         acc = sampler.acceptance_fraction

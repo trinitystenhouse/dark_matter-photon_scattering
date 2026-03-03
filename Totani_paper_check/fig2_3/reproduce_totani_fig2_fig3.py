@@ -26,7 +26,7 @@ def main():
 
     p.add_argument(
         "--mcmc-dir",
-        default=os.path.join(repo_dir, "Totani_paper_check", "mcmc", "mcmc_results"),
+        default=os.path.join(repo_dir, "Totani_paper_check", "mcmc", "mcmc_results_fig2_3"),
         help="Directory containing mcmc_results_kXX.npz files.",
     )
     p.add_argument(
@@ -75,7 +75,7 @@ def main():
     p.add_argument("--roi-lat", type=float, default=60.0)
     p.add_argument("--disk-cut", type=float, default=10.0)
     p.add_argument("--binsz", type=float, default=0.125)
-    p.add_argument("--plot-style", choices=["diagnostic", "totani"], default="diagnostic")
+    p.add_argument("--plot-style", choices=["diagnostic", "totani"], default="totani")
     p.add_argument(
         "--nE",
         type=int,

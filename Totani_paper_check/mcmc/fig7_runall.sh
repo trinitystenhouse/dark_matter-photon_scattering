@@ -7,6 +7,9 @@ for k in {0..12}; do
     --autocorr-target 50 \
     --autocorr-check-every 5000 \
     --autocorr-min-steps 50000 \
+    --verbosity 1 \
+    --iso-target-e2 1e-4 \
+    --iso-anchor --iso-anchor-e2 1e-4 \
     --iso-prior-sigma-dex 0.5 \
     --cancellation-check \
     --iso-prior-mode f --nonstable-prior-sigma 0.5

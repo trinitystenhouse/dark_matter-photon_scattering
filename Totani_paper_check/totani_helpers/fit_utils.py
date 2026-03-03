@@ -4,6 +4,11 @@ from scipy.optimize import nnls
 import os
 from astropy.io import fits
 
+try:
+    from tqdm import tqdm  # type: ignore
+except Exception:  # pragma: no cover
+    tqdm = None
+
 def data_coverage_mask3d(*, counts, expo):
     """Return True where data coverage exists: finite counts/expo and expo>0."""
     counts = np.asarray(counts)
@@ -209,6 +214,8 @@ def load_mu_templates_from_fits(
     dtype=np.float32,
     memmap=True,
     require_same_shape=True,
+    progress: bool = False,
+    progress_desc: str = "Loading FITS",
 ):
     """
     Load TRUE-counts template cubes (mu) from FITS files into mu_list.
@@ -248,7 +255,11 @@ def load_mu_templates_from_fits(
     headers = []
     shapes = []
 
-    for lab in labels:
+    it = labels
+    if bool(progress) and (tqdm is not None):
+        it = tqdm(list(labels), desc=str(progress_desc))
+
+    for lab in it:
         path = os.path.join(template_dir, filename_pattern.format(label=lab))
         if not os.path.exists(path):
             raise FileNotFoundError(f"Template not found for '{lab}': {path}")
