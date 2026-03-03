@@ -1,6 +1,9 @@
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+from matplotlib.path import Path
+from matplotlib.patches import PathPatch
 import numpy as np
 from helpers.trinity_plotting import set_plot_style
 from scipy.optimize import curve_fit
@@ -33,6 +36,64 @@ L_cosmic   =  12e9 * 0.0003066014 * 3.086e21
 HC2_GEV2_TO_M2 = 3.89379e-32   # 1 GeV^-2 = 3.89379e-32 m^2
 GEV2_TO_FB     = 3.89379e11    # 1 GeV^-2 = 3.89379e11 fb
 ALPHA_EM = 1.0 / 137.035999084
+
+
+def _latex_sci(x, sig=2):
+    x = float(x)
+    if x == 0.0:
+        return r"0"
+    s = f"{x:.{int(sig)}e}"
+    mant, exp = s.split("e")
+    mant = mant.rstrip("0").rstrip(".")
+    exp_i = int(exp)
+    return rf"{mant}\times10^{{{exp_i}}}"
+
+
+def _add_hatched_region_from_contour(
+    *,
+    ax,
+    X,
+    Y,
+    Z,
+    level,
+    hatch="////",
+    edgecolor="c",
+    zorder=3,
+    outline_lw=1.5,
+):
+    cs = ax.contour(X, Y, Z, levels=[float(level)], colors="none", linewidths=0.0)
+    segs = []
+    if hasattr(cs, "allsegs") and len(cs.allsegs) > 0:
+        segs = cs.allsegs[0]
+    for seg in segs:
+        if seg is None:
+            continue
+        seg = np.asarray(seg, dtype=float)
+        if seg.ndim != 2 or seg.shape[0] < 3:
+            continue
+        verts = np.vstack([seg, seg[0]])
+        codes = np.full(len(verts), Path.LINETO, dtype=np.uint8)
+        codes[0] = Path.MOVETO
+        codes[-1] = Path.CLOSEPOLY
+        patch = PathPatch(
+            Path(verts, codes),
+            facecolor="none",
+            edgecolor=edgecolor,
+            hatch=hatch,
+            linewidth=0.0,
+            zorder=zorder,
+        )
+        ax.add_patch(patch)
+
+    ax.contour(
+        X,
+        Y,
+        Z,
+        levels=[float(level)],
+        colors=edgecolor,
+        linewidths=float(outline_lw),
+        zorder=zorder + 1,
+    )
 
 
 VERBOSE_DSIGMA = False
@@ -300,22 +361,56 @@ def plot_tau_grid(
     best_mchi_idx = np.argmax(tau_grid, axis=1)
     tau_max_lambda = tau_grid[np.arange(tau_grid.shape[0]), best_mchi_idx]
     eft_valid_at_best = eft_valid_grid[np.arange(eft_valid_grid.shape[0]), best_mchi_idx]
+    mchi_best_lambda = mchi_grid[np.asarray(best_mchi_idx, dtype=int)]
+    mchi_best_lambda = np.asarray(mchi_best_lambda, dtype=float)
+    mchi_best_lambda[~np.isfinite(mchi_best_lambda)] = np.nan
+    mchi_best_lambda[mchi_best_lambda <= 0.0] = np.nan
+    finite_m = mchi_best_lambda[np.isfinite(mchi_best_lambda)]
+    mchi_best_is_constant = False
+    mchi_best_const_val = None
+    if finite_m.size > 0:
+        mmin = float(np.nanmin(finite_m))
+        mmax = float(np.nanmax(finite_m))
+        if mmin > 0.0 and (mmax / mmin) < 1.02:
+            mchi_best_is_constant = True
+            mchi_best_const_val = float(np.nanmedian(finite_m))
 
-    figL, axL = plt.subplots(figsize=(6.0, 4.0))
+    plot_text_fs = 9
+
+    figL = plt.figure(figsize=(9.5, 4.0), constrained_layout=True)
+    gsL = figL.add_gridspec(1, 2, width_ratios=[4.2, 1.8], wspace=0.18)
+    axL = figL.add_subplot(gsL[0, 0])
+    axLtxt = figL.add_subplot(gsL[0, 1])
+    axLtxt.axis("off")
     axL.plot(Lambda_grid, np.asarray(tau_max_lambda, dtype=float), lw=2)
     axL.axhline(float(tau_needed), color="w", ls="--", lw=1, label="Target")
 
-    if meta_text is not None and str(meta_text).strip():
-        axL.text(
-            0.02,
-            0.98,
-            str(meta_text),
-            transform=axL.transAxes,
+    axL2 = None
+    if not mchi_best_is_constant:
+        axL2 = axL.twinx()
+        axL2.plot(
+            Lambda_grid,
+            np.asarray(mchi_best_lambda, dtype=float),
+            color="c",
+            lw=1.5,
+            label=r"$m_{\chi,\,\mathrm{best}}(\Lambda)$",
+        )
+
+    side_text = str(meta_text) if (meta_text is not None) else ""
+    if mchi_best_is_constant and (mchi_best_const_val is not None):
+        extra = rf"$m_{{\chi,\,\mathrm{{best}}}}\approx {_latex_sci(mchi_best_const_val)}\ \mathrm{{GeV}}$"
+        side_text = (side_text + "\n" + extra) if side_text.strip() else extra
+
+    if side_text.strip():
+        axLtxt.text(
+            0.0,
+            1.0,
+            side_text,
+            transform=axLtxt.transAxes,
             ha="left",
             va="top",
             color="w",
-            fontsize=9,
-            bbox={"facecolor": "k", "alpha": 0.35, "edgecolor": "none"},
+            fontsize=plot_text_fs,
         )
 
     invalid = ~np.asarray(eft_valid_at_best, dtype=bool)
@@ -337,17 +432,28 @@ def plot_tau_grid(
 
     axL.set_xscale("log")
     axL.set_yscale("log")
+    if axL2 is not None:
+        axL2.set_yscale("log")
     axL.set_xlabel(r"$\Lambda\,\,[\mathrm{GeV}]$")
     axL.set_ylabel(rf"$\tau_\max$ ({str(tau_energy_label)})")
-    axL.legend(frameon=False)
+    h1, l1 = axL.get_legend_handles_labels()
+    if axL2 is not None:
+        axL2.set_ylabel(r"$m_{\chi,\,\mathrm{best}}\,[\mathrm{GeV}]$")
+        h2, l2 = axL2.get_legend_handles_labels()
+        axL.legend(handles=(h1 + h2), labels=(l1 + l2), frameon=False)
+    else:
+        axL.legend(handles=h1, labels=l1, frameon=False)
     out_tau = os.path.join(outdir, f"tau_vs_lambda_{str(operator)}_{str(baseline)}.png")
-    figL.tight_layout()
     plt.savefig(out_tau)
     plt.close(figL)
 
     log10_tau = np.log10(np.asarray(tau_grid, dtype=float) + 1e-30)
 
-    figG, axG = plt.subplots(figsize=(6.5, 5.5))
+    figG = plt.figure(figsize=(9.5, 5.5))
+    gsG = figG.add_gridspec(1, 2, width_ratios=[4.9, 1.6], wspace=0.05)
+    axG = figG.add_subplot(gsG[0, 0])
+    axGtxt = figG.add_subplot(gsG[0, 1])
+    axGtxt.axis("off")
     x = np.log10(Lambda_grid)
     y = np.log10(mchi_grid)
     X, Y = np.meshgrid(x, y, indexing="xy")
@@ -364,48 +470,54 @@ def plot_tau_grid(
     cbar.set_label(r"$\log_{10}(\tau_{\max})$")
 
     if meta_text is not None and str(meta_text).strip():
-        axG.text(
-            0.02,
-            0.02,
+        axGtxt.text(
+            0.0,
+            1.0,
             str(meta_text),
-            transform=axG.transAxes,
+            transform=axGtxt.transAxes,
             ha="left",
-            va="bottom",
+            va="top",
             color="w",
-            fontsize=9,
-            bbox={"facecolor": "k", "alpha": 0.35, "edgecolor": "none"},
-            zorder=6,
+            fontsize=plot_text_fs,
         )
 
     legend_handles = []
+
+    has_overlap = False
 
     if float(tau_needed) > 0.0:
         tau_field = np.asarray(tau_grid, dtype=float).T
         eft_mask = np.asarray(eft_valid_grid, dtype=bool).T
 
-        tau_field_valid = np.ma.masked_where(~eft_mask, tau_field)
+        tau_field_valid = np.ma.masked_where(
+            (~eft_mask) | (~np.isfinite(np.asarray(tau_field, dtype=float))),
+            tau_field,
+        )
+
         has_overlap = bool(
             np.any(
                 (~tau_field_valid.mask)
-                & np.isfinite(np.asarray(tau_field_valid))
                 & (np.asarray(tau_field_valid) >= float(tau_needed))
             )
         )
         if has_overlap:
-            axG.contourf(
-                X,
-                Y,
-                tau_field_valid,
-                levels=[float(tau_needed), float(np.max(tau_field_valid))],
-                colors="none",
-                hatches=["////"],
-                alpha=0.0,
+            tau_max_valid = float(np.max(tau_field_valid))
+            _add_hatched_region_from_contour(
+                ax=axG,
+                X=X,
+                Y=Y,
+                Z=tau_field_valid,
+                level=float(tau_needed),
+                hatch="////",
+                edgecolor="c",
                 zorder=3,
+                outline_lw=1.5,
             )
+
             legend_handles.append(
                 Patch(
                     facecolor="none",
-                    edgecolor="w",
+                    edgecolor="c",
                     hatch="////",
                     label=r"EFT-valid + testable ($\tau\geq\tau_{\rm needed}$)",
                 )
@@ -419,7 +531,7 @@ def plot_tau_grid(
                 ha="left",
                 va="top",
                 color="w",
-                fontsize=10,
+                fontsize=plot_text_fs,
                 bbox={"facecolor": "k", "alpha": 0.35, "edgecolor": "none"},
                 zorder=6,
             )
@@ -487,7 +599,14 @@ def plot_tau_grid(
         )
 
     if len(legend_handles) > 0:
-        axG.legend(handles=legend_handles, frameon=False, loc="best")
+        legend_anchor_y = 0.98 if has_overlap else 0.86
+        axG.legend(
+            handles=legend_handles,
+            frameon=False,
+            loc="upper left",
+            bbox_to_anchor=(0.02, legend_anchor_y),
+            borderaxespad=0.0,
+        )
 
     out_grid = os.path.join(outdir, f"tau_grid_{str(operator)}_{str(baseline)}.png")
     figG.tight_layout()
@@ -1182,10 +1301,12 @@ def main():
                 f"operator={str(OPERATOR)}",
                 f"fermion={str(FERMION_TYPE)}",
                 f"baseline={str(baseline)}",
-                rf"$\rho_\chi={float(RHO_CHI_SETTING):.2e}\ \mathrm{{GeV/cm^3}}$",
-                rf"$L={float(L_SETTING):.2e}\ \mathrm{{cm}}$",
+                rf"$m_\chi\in[10^{{{float(args.log10_mchi_min):g}}},10^{{{float(args.log10_mchi_max):g}}}]\ \mathrm{{GeV}}$",
+                r"$\tau_{\max}(\Lambda)=\max_{m_\chi}\,\tau_{\max}(\Lambda,m_\chi)$",
+                rf"$\rho_\chi={_latex_sci(RHO_CHI_SETTING)}\ \mathrm{{GeV/cm^3}}$",
+                rf"$L={_latex_sci(L_SETTING)}\ \mathrm{{cm}}$",
                 rf"$f_\mathrm{{EFT}}={float(args.eft_kinematic_factor):g}$",
-                rf"$\tau_\mathrm{{needed}}={float(tau_needed):.2e}$",
+                rf"$\tau_\mathrm{{needed}}={_latex_sci(tau_needed)}$",
                 rf"dip\ depth={float(dip_depth):g}",
                 f"tau_mode={tau_mode}",
                 rf"{str(tau_energy_label)}",
