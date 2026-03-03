@@ -16,15 +16,14 @@ from totani_helpers.totani_io import (  # noqa: E402
     read_exposure,
     resample_exposure_logE,
 )
-from totani_helpers.cellwise_fit import fit_cellwise_poisson_mle_counts  # noqa: E402
-from totani_helpers.fit_utils import build_fit_mask3d  # noqa: E402
+from totani_helpers.fit_utils import E2_from_pred_counts_maps, build_fit_mask3d  # noqa: E402
+from totani_helpers.mcmc_io import combine_loopI, load_mcmc_coeffs_by_label, pick_coeff
 
 # Reuse plotting/spectrum utilities from fig2_3
 from fig2_3.make_totani_fig2_fig3_all import (  # noqa: E402
     assert_templates_match_counts,
     data_E2_spectrum_counts,
     load_mu_templates_from_fits,
-    model_E2_spectrum_from_cells_counts,
     plot_fit_fig2,
 )
 
@@ -38,6 +37,17 @@ DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
 
 def main():
     ap = argparse.ArgumentParser(description="Reproduce Totani Fig.4: best-fit spectra excluding disk, using bubbles pos/neg, no GC excess.")
+    ap.add_argument(
+        "--mcmc-dir",
+        default=os.path.join(REPO_DIR, "Totani_paper_check", "mcmc", "mcmc_results"),
+        help="Directory containing mcmc_results_kXX.npz files.",
+    )
+    ap.add_argument(
+        "--mcmc-stat",
+        choices=["f_ml", "f_p50", "f_p16", "f_p84"],
+        default="f_ml",
+        help="Which MCMC summary coefficient to use per bin.",
+    )
     ap.add_argument("--counts", default=os.path.join(DATA_DIR, "processed", "counts_ccube_1000to1000000.fits"))
     ap.add_argument("--expo", default=os.path.join(DATA_DIR, "processed", "expcube_1000to1000000.fits"))
     ap.add_argument("--templates-dir", default=os.path.join(DATA_DIR, "processed", "templates"))
@@ -100,7 +110,7 @@ def main():
     )
 
     # Components: no NFW, no flat bubbles; use bubbles_pos/neg
-    labels = ["gas", "iso", "ps", "loopI", "ics", "fb_neg_norm", "fb_pos_norm"]
+    labels = ["gas", "iso", "ps", "loopI", "ics", "fb_neg", "fb_pos"]
     mu_list, _hdrs = load_mu_templates_from_fits(
         template_dir=args.templates_dir,
         labels=labels,
@@ -111,22 +121,11 @@ def main():
 
     Ectr_gev = Ectr_mev / 1000.0
 
-    res_fit = fit_cellwise_poisson_mle_counts(
-        counts=counts,
-        templates=mu_list,
-        mask3d=fit_mask3d,
-        lon=lon,
-        lat=lat,
-        roi_lon=float(args.roi_lon),
-        roi_lat=float(args.roi_lat),
-        cell_deg=float(args.cell_deg),
-        nonneg=True,
-    )
-    cells = res_fit["cells"]
-    coeff_cells = res_fit["coeff_cells"]
+    tab = load_mcmc_coeffs_by_label(mcmc_dir=str(args.mcmc_dir), stat=str(args.mcmc_stat), nE=nE)
+    coeffs_plot = combine_loopI(coeffs_by_label=dict(tab.coeffs_by_label), out_key="loopI", drop_inputs=False)
 
-    # Plot region is the same as fit region for Fig.4
     mask3d_plot = fit_mask3d
+    mask2d_plot = np.all(mask3d_plot, axis=0)
 
     E2_data, E2err_data = data_E2_spectrum_counts(
         counts=counts,
@@ -137,21 +136,40 @@ def main():
         mask3d=mask3d_plot,
     )
 
-    E2_comp, E2_model = model_E2_spectrum_from_cells_counts(
-        coeff_cells=coeff_cells,
-        cells=cells,
-        templates=mu_list,
-        expo=expo,
-        omega=omega,
-        dE_mev=dE_mev,
-        Ectr_mev=Ectr_mev,
-        mask3d=mask3d_plot,
-    )
+    comp_specs = {}
+    E2_model = np.zeros_like(Ectr_mev, dtype=float)
+    for lab, mu in zip(labels, mu_list):
+        if str(lab) == "loopI" and ("loopA" in coeffs_plot) and ("loopB" in coeffs_plot):
+            aA = pick_coeff(coeffs_by_label=coeffs_plot, template_key="loopA")
+            aB = pick_coeff(coeffs_by_label=coeffs_plot, template_key="loopB")
+            muA = load_mu_templates_from_fits(
+                template_dir=args.templates_dir,
+                labels=["loopA"],
+                filename_pattern="mu_{label}_counts.fits",
+                hdu=0,
+            )[0][0]
+            muB = load_mu_templates_from_fits(
+                template_dir=args.templates_dir,
+                labels=["loopB"],
+                filename_pattern="mu_{label}_counts.fits",
+                hdu=0,
+            )[0][0]
+            pred = np.asarray(aA, float)[:, None, None] * np.asarray(muA, float) + np.asarray(aB, float)[:, None, None] * np.asarray(muB, float)
+        else:
+            a = pick_coeff(coeffs_by_label=coeffs_plot, template_key=str(lab))
+            pred = np.asarray(a, float)[:, None, None] * np.asarray(mu, float)
 
-    comp_specs = {lab: E2_comp[j] for j, lab in enumerate(labels)}
-    # Invert sign of negative bubbles component for plotting so it appears positive.
-    if "bubbles_neg" in comp_specs:
-        comp_specs["bubbles_neg"] = -comp_specs["bubbles_neg"]
+        E2 = E2_from_pred_counts_maps(
+            pred_counts_map=pred,
+            expo=expo,
+            omega=omega,
+            dE_mev=dE_mev,
+            Ectr_mev=Ectr_mev,
+            mask2d=mask2d_plot,
+        )
+        comp_specs[str(lab)] = E2
+        E2_model += E2
+
     comp_specs["MODEL_SUM"] = E2_model
 
     out_png = os.path.join(args.outdir, "totani_fig4_fit_components.png")
@@ -170,17 +188,26 @@ def main():
         f.write("# k  Ectr(GeV)  " + "  ".join(labels) + "\n")
         for k in range(nE):
             csum = np.zeros(len(labels), float)
-            for ci, cell2d in enumerate(cells):
-                cm = mask3d_plot[k] & cell2d
-                if not np.any(cm):
-                    continue
-                a = coeff_cells[ci, k, :]
-                if not np.all(np.isfinite(a)):
-                    continue
-                for j in range(len(labels)):
-                    s = float(np.nansum(mu_list[j][k][cm]))
-                    if np.isfinite(s) and s != 0.0:
-                        csum[j] += float(a[j]) * s
+            for j, lab in enumerate(labels):
+                if str(lab) == "loopI" and ("loopA" in coeffs_plot) and ("loopB" in coeffs_plot):
+                    aA = float(np.asarray(coeffs_plot["loopA"], float).reshape(-1)[k])
+                    aB = float(np.asarray(coeffs_plot["loopB"], float).reshape(-1)[k])
+                    muA = load_mu_templates_from_fits(
+                        template_dir=args.templates_dir,
+                        labels=["loopA"],
+                        filename_pattern="mu_{label}_counts.fits",
+                        hdu=0,
+                    )[0][0]
+                    muB = load_mu_templates_from_fits(
+                        template_dir=args.templates_dir,
+                        labels=["loopB"],
+                        filename_pattern="mu_{label}_counts.fits",
+                        hdu=0,
+                    )[0][0]
+                    csum[j] = float(aA) * float(np.nansum(muA[k][mask3d_plot[k]])) + float(aB) * float(np.nansum(muB[k][mask3d_plot[k]]))
+                else:
+                    a = float(np.asarray(pick_coeff(coeffs_by_label=coeffs_plot, template_key=str(lab)), float).reshape(-1)[k])
+                    csum[j] = a * float(np.nansum(mu_list[j][k][mask3d_plot[k]]))
 
             f.write(
                 f"{k:02d} {Ectr_gev[k]:.6g} "

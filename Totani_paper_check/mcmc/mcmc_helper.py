@@ -99,7 +99,7 @@ def totani_init_from_mu_counts(
     mu: np.ndarray,              # (ncomp, npix) counts-space templates for THIS energy bin
     denom: np.ndarray,           # (npix,) expo*omega*dE on the same masked pixels
     Ectr_mev: float,
-    iso_target_E2: Optional[float] = None, # If None, iso starts at f=1 like other physical templates
+    iso_target_E2: Optional[float] = 1e-4, # If None, iso starts at f=1 like other physical templates
     ps_keys: Sequence[str] = ("ps", "point_sources", "pointsources"),
     galprop_keys: Sequence[str] = ("gas", "ics", "galprop_gas", "galprop_ics"),
     iso_keys: Sequence[str] = ("iso", "isotropic"),

@@ -16,8 +16,8 @@ from totani_helpers.totani_io import (  # noqa: E402
     read_exposure,
     resample_exposure_logE,
 )
-from totani_helpers.cellwise_fit import fit_cellwise_poisson_mle_counts
 from totani_helpers.fit_utils import build_fit_mask3d
+from totani_helpers.mcmc_io import load_mcmc_coeffs_by_label
 
 from make_fig import make_fig
 
@@ -31,6 +31,18 @@ DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
 
 def main():
     ap = argparse.ArgumentParser(description="Reproduce Totani Figs.5-7: best-fit spectra excluding disk, using bubbles pos/neg.")
+    ap.add_argument(
+        "--mcmc-dir",
+        default=os.path.join(REPO_DIR, "Totani_paper_check", "mcmc", "mcmc_results_fig7"),
+        help="Directory containing mcmc_results_kXX.npz files.",
+    )
+    ap.add_argument("--fig", default="fig7", help="Name of figure you are generating.")
+    ap.add_argument(
+        "--mcmc-stat",
+        choices=["f_ml", "f_p50", "f_p16", "f_p84"],
+        default="f_ml",
+        help="Which MCMC summary coefficient to use per bin.",
+    )
     ap.add_argument("--counts", default=os.path.join(DATA_DIR, "processed", "counts_ccube_1000to1000000.fits"))
     ap.add_argument("--expo", default=os.path.join(DATA_DIR, "processed", "expcube_1000to1000000.fits"))
     ap.add_argument("--templates-dir", default=os.path.join(DATA_DIR, "processed", "templates"))
@@ -92,6 +104,9 @@ def main():
         extra2d=hilat2d,
     )
 
+    tab = load_mcmc_coeffs_by_label(mcmc_dir=str(args.mcmc_dir), stat=str(args.mcmc_stat), nE=nE)
+    coeffs_by_label = dict(tab.coeffs_by_label)
+
     common = dict(
         templates_dir=args.templates_dir,
         counts=counts,
@@ -105,34 +120,37 @@ def main():
         roi_lon=float(args.roi_lon),
         roi_lat=float(args.roi_lat),
         cell_deg=float(args.cell_deg),
+        coeffs_by_label=coeffs_by_label,
     )
 
-    labels_5 = ["gas", "iso", "ps", "loopI", "ics", "nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno", "fb_pos", "fb_neg"]
-    make_fig(
-        labels=labels_5,
-        out_png=os.path.join(args.outdir, "totani_fig5_fit_components.png"),
-        out_coeff=os.path.join(args.outdir, "fit_coefficients_fig5_disk_removed_posneg.txt"),
-        title=rf"|l|≤{args.roi_lon}°\n{args.disk_cut}°≤|b|≤{args.roi_lat}° (fit excludes disk; NFW rho=2.5)",
-        **common,
-    )
+    if args.fig == "fig5":
+        labels_5 = ["gas", "iso", "ps", "loopI", "ics", "nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno", "fb_pos", "fb_neg"]
+        make_fig(
+            labels=labels_5,
+            out_png=os.path.join(args.outdir, "totani_fig5_fit_components.png"),
+            out_coeff=os.path.join(args.outdir, "fit_coefficients_fig5_disk_removed_posneg.txt"),
+            title=rf"|l|≤{args.roi_lon}°\n{args.disk_cut}°≤|b|≤{args.roi_lat}° (fit excludes disk; NFW rho=2.5)",
+            **common,
+        )
+    if args.fig == "fig6":
+        labels_6 = ["gas", "iso", "ps", "loopI", "ics", "nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno", "fb_pos", "fb_neg"]
+        make_fig(
+            labels=labels_6,
+            out_png=os.path.join(args.outdir, "totani_fig6_fit_components.png"),
+            out_coeff=os.path.join(args.outdir, "fit_coefficients_fig6_disk_removed_posneg.txt"),
+            title=rf"|l|≤{args.roi_lon}°\n{args.disk_cut}°≤|b|≤{args.roi_lat}° (fit excludes disk; NFW rho=2)",
+            **common,
+        )
 
-    labels_6 = ["gas", "iso", "ps", "loopI", "ics", "nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno", "fb_pos", "fb_neg"]
-    make_fig(
-        labels=labels_6,
-        out_png=os.path.join(args.outdir, "totani_fig6_fit_components.png"),
-        out_coeff=os.path.join(args.outdir, "fit_coefficients_fig6_disk_removed_posneg.txt"),
-        title=rf"|l|≤{args.roi_lon}°\n{args.disk_cut}°≤|b|≤{args.roi_lat}° (fit excludes disk; NFW rho=2)",
-        **common,
-    )
-
-    labels_7 = ["gas", "iso", "ps", "loopI", "ics", "nfw_NFW_g1_rho1_rs21_R08_rvir402_ns2048_normpole_pheno", "fb_pos", "fb_neg"]
-    make_fig(
-        labels=labels_7,
-        out_png=os.path.join(args.outdir, "totani_fig7_fit_components.png"),
-        out_coeff=os.path.join(args.outdir, "fit_coefficients_fig7_disk_removed_posneg.txt"),
-        title=rf"|l|≤{args.roi_lon}°\n{args.disk_cut}°≤|b|≤{args.roi_lat}° (fit excludes disk; NFW rho=1)",
-        **common,
-    )
+    if args.fig == "fig7":
+        labels_7 = ["gas", "iso", "ps", "loopI", "ics", "nfw_NFW_g1_rho1_rs21_R08_rvir402_ns2048_normpole_pheno", "fb_pos", "fb_neg"]
+        make_fig(
+            labels=labels_7,
+            out_png=os.path.join(args.outdir, "totani_fig7_fit_components.png"),
+            out_coeff=os.path.join(args.outdir, "fit_coefficients_fig7_disk_removed_posneg.txt"),
+            title=rf"|l|≤{args.roi_lon}°\n{args.disk_cut}°≤|b|≤{args.roi_lat}° (fit excludes disk; NFW rho=1)",
+            **common,
+        )
 
 
 if __name__ == "__main__":

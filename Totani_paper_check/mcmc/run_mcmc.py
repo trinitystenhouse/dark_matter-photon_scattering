@@ -784,7 +784,9 @@ def main():
 
     # ---- Save results (compressed, minimal by default)
     outfile = os.path.join(args.outdir, f"mcmc_results_k{k:02d}.npz")
-    outfile_tmp = outfile + ".tmp"
+    # NOTE: np.savez_compressed appends '.npz' if the provided path doesn't end with '.npz'.
+    # Make the tmp path end with '.npz' so os.replace can find it.
+    outfile_tmp = outfile + ".tmp.npz"
     
     # Build save dict with essential arrays (downcast to float32 to save space)
     save_dict = {

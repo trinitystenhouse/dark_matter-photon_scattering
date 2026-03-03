@@ -224,10 +224,13 @@ def main():
     # Normalisation choices
     ap.add_argument(
         "--norm",
-        choices=["pole", "roi-sum", "pole+roi-sum"],
+        choices=["pole", "roi-sum", "pole+roi-sum", "ref-point"],
         default="pole",
         help="How to normalize the spatial template.",
     )
+
+    ap.add_argument("--ref-lon", type=float, default=0.0)
+    ap.add_argument("--ref-lat", type=float, default=45.0)
 
     # Exposure sampling
     ap.add_argument(
@@ -253,6 +256,8 @@ def main():
         f"_ns{args.n_s:d}"
     )
     suffix += f"_norm{args.norm}"
+    if args.norm == "ref-point":
+        suffix += f"_reflon{args.ref_lon:g}_reflat{args.ref_lat:g}"
     if args.expo_sampling != "center":
         suffix += f"_expo{args.expo_sampling}"
     suffix += "_pheno"
@@ -299,8 +304,45 @@ def main():
     roi = (np.abs(lon) <= args.roi_lon) & (np.abs(lat) <= args.roi_lat)
     roi &= data_ok2d
 
+    if np.any(data_ok2d):
+        max_abs_lat_cov = float(np.nanmax(np.abs(lat[data_ok2d])))
+        print(f"max |lat| with valid data coverage: {max_abs_lat_cov:.2f} deg")
+        if max_abs_lat_cov < 55.0:
+            print(
+                "WARNING: data coverage does not extend to |b|>=55 deg; "
+                "high-latitude discrimination between NFW rho^1, rho^2, and rho^2.5 templates "
+                "will be degraded relative to Totani (2025)."
+            )
+    else:
+        print("WARNING: no valid data coverage pixels found (data_ok2d is empty).")
+
+    norm_mode = args.norm
+    norm_fact_total = 1.0
+    refpole = None
+
+    if args.rho_power == 2.0 and args.norm in ("pole", "pole+roi-sum", "ref-point"):
+        expected = 8.93e14
+        got = pole_normalization_value(
+            rho_power=2.0,
+            gamma=args.gamma,
+            rs_kpc=args.rs_kpc,
+            rhos=args.rhos,
+            R0_kpc=args.R0_kpc,
+            rvir_kpc=args.rvir_kpc,
+            n_s=max(4096, args.n_s),
+            smax_kpc=args.smax_kpc,
+        )
+        frac = abs(got - expected) / expected
+        if frac > 0.05:
+            raise RuntimeError(
+                "Pole normalization check failed for rho_power=2: "
+                f"got {got:.3e}, expected {expected:.3e} (discrepancy {frac*100:.1f}%). "
+                "This usually indicates at least one NFW parameter differs from the paper (e.g. "
+                f"rhos={args.rhos}, rs_kpc={args.rs_kpc}, R0_kpc={args.R0_kpc}, rvir_kpc={args.rvir_kpc}, gamma={args.gamma})."
+            )
+
     # Optional: pole normalisation (interpretability)
-    if args.norm in ("pole", "pole+roi-sum"):
+    if args.norm in ("pole", "pole+roi-sum", "ref-point"):
         Jpole = pole_normalization_value(
             rho_power=args.rho_power,
             gamma=args.gamma,
@@ -313,7 +355,53 @@ def main():
         )
         if not np.isfinite(Jpole) or Jpole <= 0:
             raise RuntimeError("Pole normalization integral is non-positive.")
+
+    if args.norm == "pole":
         J = J / Jpole
+        norm_fact_total *= float(Jpole)
+    elif args.norm == "ref-point":
+        ref_lon = float(args.ref_lon) % 360.0
+        ref_lat = float(args.ref_lat)
+        x_ref, y_ref = wcs.world_to_pixel_values(ref_lon, ref_lat)
+        ix = int(np.rint(x_ref))
+        iy = int(np.rint(y_ref))
+        if ix < 0 or ix >= nx or iy < 0 or iy >= ny:
+            raise RuntimeError(
+                f"Reference point (lon,lat)=({args.ref_lon},{args.ref_lat}) maps to pixel (x,y)=({x_ref:.2f},{y_ref:.2f}) outside the template grid."
+            )
+        Jref = float(J[iy, ix])
+        if not np.isfinite(Jref) or Jref <= 0:
+            raise RuntimeError(
+                f"Reference-point normalization failed: J at (lon,lat)=({args.ref_lon},{args.ref_lat}) is {Jref}. "
+                "Choose a reference point with valid coverage and positive J."
+            )
+        refpole = float(Jref / Jpole)
+        J = J / Jref
+        norm_fact_total *= float(Jref)
+        norm_mode = "ref-point"
+    elif args.norm == "roi-sum":
+        vals = J[roi]
+        vals = vals[np.isfinite(vals) & (vals > 0)]
+        if vals.size == 0:
+            raise RuntimeError("NFW template is zero in ROI after masking.")
+        denom = float(np.sum(vals))
+        if denom <= 0 or not np.isfinite(denom):
+            raise RuntimeError("ROI-sum normalization factor is non-positive or non-finite.")
+        J = J / denom
+        norm_fact_total *= denom
+    elif args.norm == "pole+roi-sum":
+        J = J / Jpole
+        norm_fact_total *= float(Jpole)
+        vals = J[roi]
+        vals = vals[np.isfinite(vals) & (vals > 0)]
+        if vals.size == 0:
+            raise RuntimeError("NFW template is zero in ROI after masking.")
+        denom = float(np.sum(vals))
+        if denom <= 0 or not np.isfinite(denom):
+            raise RuntimeError("ROI-sum normalization factor is non-positive or non-finite.")
+        J = J / denom
+        norm_fact_total *= denom
+
 
     # For fitting stability: normalise spatial template to mean=1 within ROI
     # vals = J[roi]
@@ -332,13 +420,6 @@ def main():
 
 
     # --- COUNTS TEMPLATE (this is what your mu_list expects) ---
-    # Normalize spatial template to mean=1 in ROI for numerical stability
-    vals = nfw_spatial[roi]
-    vals = vals[np.isfinite(vals) & (vals > 0)]
-    if vals.size == 0:
-        raise RuntimeError("NFW template is zero in ROI after masking.")
-    nfw_spatial = nfw_spatial / np.mean(vals)
-    
     # denom here is the factor that converts flux -> counts
     conv = expo * omega[None, :, :] * dE_mev[:, None, None]   # shape (nE,ny,nx)
     # Template is shape-only; fitted coefficient will be in units of flux [ph cm^-2 s^-1 sr^-1 MeV^-1]
@@ -354,9 +435,15 @@ def main():
     # Write outputs (include EBOUNDS so checkers don’t need counts file)
     # -------------------------
 
-    write_cube(out_dnde, nfw_dnde, hdr, bunit="ph cm-2 s-1 sr-1 MeV-1")
-    write_cube(out_e2dnde, nfw_E2dnde, hdr, bunit="MeV cm-2 s-1 sr-1")
-    write_cube(out_mu, mu_nfw, hdr, bunit="counts")
+    hdr_out = hdr.copy()
+    hdr_out["NORMFACT"] = (float(norm_fact_total), "Factor divided out of raw J to form output")
+    hdr_out["NORMMODE"] = (str(norm_mode), "Normalization mode used for spatial template")
+    if refpole is not None:
+        hdr_out["REFPOLE"] = (float(refpole), "J_ref / J_pole (preserves conversion to pole)")
+
+    write_cube(out_dnde, nfw_dnde, hdr_out, bunit="ph cm-2 s-1 sr-1 MeV-1")
+    write_cube(out_e2dnde, nfw_E2dnde, hdr_out, bunit="MeV cm-2 s-1 sr-1")
+    write_cube(out_mu, mu_nfw, hdr_out, bunit="counts")
 
     print("✓ wrote", out_dnde)
     print("✓ wrote", out_e2dnde)

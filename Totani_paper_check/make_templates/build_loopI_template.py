@@ -185,12 +185,6 @@ def main():
     # I_gamma ~ 10^-7 to 10^-6 ph cm^-2 s^-1 sr^-1 MeV^-1 at 1 GeV
     # with spectrum roughly E^-2.5 to E^-3
     
-    # --- Normalise morphology for numerical stability (NOT physical scaling) ---
-    fit2d = roi2d  # or roi2d & data_ok2d & ext_mask2d if you have those here
-    vals = T[fit2d]
-    vals = vals[np.isfinite(vals) & (vals > 0)]
-    if vals.size == 0:
-        raise RuntimeError("Loop I template has no positive pixels in fit mask")
 
     if args.debug:
         fit_vals_all = T[fit2d]
@@ -209,7 +203,7 @@ def main():
             f" mean={np.nanmean(vals):.6g} sum={np.nansum(vals):.6g} n={vals.size}"
         )
 
-    T_norm = T / np.mean(vals)   # mean=1 in fit region (recommended)
+    T_norm = T
 
     if args.debug:
         fit_vals_norm = T_norm[fit2d]
@@ -244,7 +238,7 @@ def main():
         if vals_in.size == 0:
             raise RuntimeError("Loop I sub-template has no positive pixels in fit mask")
 
-        Tn = T_in / np.mean(vals_in)
+        Tn = T_in
         dnde = np.broadcast_to(Tn[None, :, :], (nE, ny, nx)).astype(float).copy()
         mu = dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
         e2 = dnde * (Ectr_mev[:, None, None] ** 2)
