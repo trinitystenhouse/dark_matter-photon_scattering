@@ -1,4 +1,6 @@
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 import numpy as np
 from helpers.trinity_plotting import set_plot_style
 from scipy.optimize import curve_fit
@@ -157,7 +159,7 @@ def get_dsigma_dOmega(mchi, theta, E_gamma, *,
 
 def compute_max_tau_grid(
     *,
-    E_target,
+    E_eval,
     rho_chi,
     L_cm,
     omega_max_for_validity,
@@ -172,13 +174,20 @@ def compute_max_tau_grid(
     fermion_type=None,
 ):
     """
-    Compute tau_max(Lambda, mchi) on a 2D grid at c=1 (maximum coupling).
+    Compute the maximum achievable optical depth tau_max(Lambda, mchi) on a
+    2D grid, fixing the coupling to c=1 (maximum perturbative value).
 
-    Returns a dict with keys:
-        'Lambda_grid'   : 1D array, shape (n_Lambda,)
-        'mchi_grid'     : 1D array, shape (n_mchi,)
-        'tau_grid'      : 2D array, shape (n_Lambda, n_mchi)
-        'eft_valid_grid': 2D bool array, shape (n_Lambda, n_mchi)
+    Used for exclusion/reach analysis: the contour tau_max = tau_needed is the
+    sensitivity boundary — parameter space above it would have produced a
+    visible attenuation signal and is excluded by the data.
+
+    Returns
+    -------
+    dict with keys:
+        'Lambda_grid'    : 1D array, shape (n_Lambda,)   [GeV]
+        'mchi_grid'      : 1D array, shape (n_mchi,)     [GeV]
+        'tau_grid'       : 2D array, shape (n_Lambda, n_mchi)
+        'eft_valid_grid' : 2D bool array, shape (n_Lambda, n_mchi)
     """
 
     if operator is None:
@@ -200,19 +209,15 @@ def compute_max_tau_grid(
     operator = str(operator)
     fermion_type = str(fermion_type)
 
-    if operator == "dipole_magnetic":
-        cs, cp = 1.0, 0.0
-    elif operator == "dipole_electric":
-        cs, cp = 0.0, 1.0
-    elif operator == "charge_radius":
-        cs, cp = 1.0, 0.0
-    elif operator == "anapole":
-        cs, cp = 0.0, 1.0
-    else:
-        cs, cp = 1.0, 1.0
+    n_Lambda = int(n_Lambda)
+    progress_every = max(1, int(np.ceil(float(n_Lambda) / 5.0)))
 
     for iL, Lam in enumerate(Lambda_grid):
         Lam = float(Lam)
+        if (iL % progress_every) == 0 or iL == (len(Lambda_grid) - 1):
+            pct = int(round(100.0 * float(iL) / float(max(len(Lambda_grid) - 1, 1))))
+            print(f"compute_max_tau_grid: {pct}%")
+
         for im, mchi in enumerate(mchi_grid):
             mchi = float(mchi)
             is_valid = eft_valid_kinematics_lab(
@@ -222,25 +227,22 @@ def compute_max_tau_grid(
                 float(eft_kinematic_factor),
             )
             eft_valid_grid[iL, im] = bool(is_valid)
-            if not is_valid:
-                tau_grid[iL, im] = 0.0
-                continue
 
-            sigma_cm2 = sigma_tot_params_cm2(
-                float(E_target),
+            sigma_cm2_arr = sigma_array_cm2(
+                E_eval,
                 float(mchi),
-                float(cs),
-                float(cp),
+                1.0,
+                1.0,
                 float(Lam),
                 operator=operator,
                 fermion_type=fermion_type,
             )
-            if not np.isfinite(sigma_cm2) or float(sigma_cm2) <= 0.0:
-                tau_grid[iL, im] = 0.0
-                continue
+            sigma_cm2_arr = np.nan_to_num(sigma_cm2_arr, nan=0.0, posinf=0.0, neginf=0.0)
+            sigma_cm2_arr = np.where(sigma_cm2_arr > 0.0, sigma_cm2_arr, 0.0)
 
             A = float(rho_chi) * float(L_cm) / float(max(mchi, 1e-30))
-            tau_grid[iL, im] = float(A) * float(sigma_cm2)
+            tau_arr = float(A) * np.asarray(sigma_cm2_arr, dtype=float)
+            tau_grid[iL, im] = float(np.max(tau_arr)) if tau_arr.size else 0.0
 
     return {
         "Lambda_grid": Lambda_grid,
@@ -248,6 +250,249 @@ def compute_max_tau_grid(
         "tau_grid": tau_grid,
         "eft_valid_grid": eft_valid_grid,
     }
+
+
+def plot_tau_grid(
+    *,
+    Lambda_grid,
+    mchi_grid,
+    tau_grid,
+    eft_valid_grid,
+    tau_needed,
+    tau_energy_label,
+    outdir,
+    operator,
+    baseline,
+    meta_text=None,
+):
+    """Plot exclusion/reach figures from a tau grid.
+
+    Produces:
+    - Figure A: 1D slice of tau_max(E_target) vs Lambda with EFT-invalid shading
+    - Figure B: 2D map of log10(tau_max) in (log10 Lambda, log10 mchi) with
+      sensitivity and EFT-validity contours.
+
+    Parameters
+    ----------
+    Lambda_grid, mchi_grid, tau_grid, eft_valid_grid
+        Outputs of compute_max_tau_grid.
+    tau_needed : float
+        Target optical depth corresponding to the chosen dip depth.
+    tau_energy_label : str
+        Label describing how tau_max was defined (single energy or band-based).
+    outdir : str
+        Output directory.
+    operator : str
+        Operator label for filenames.
+    baseline : str
+        Baseline label for filenames.
+    meta_text : str or None
+        Optional multi-line string to draw onto the plots listing run constants.
+    """
+
+    Lambda_grid = np.asarray(Lambda_grid, dtype=float)
+    mchi_grid = np.asarray(mchi_grid, dtype=float)
+    tau_grid = np.asarray(tau_grid, dtype=float)
+    eft_valid_grid = np.asarray(eft_valid_grid, dtype=bool)
+
+    os.makedirs(outdir, exist_ok=True)
+
+    best_mchi_idx = np.argmax(tau_grid, axis=1)
+    tau_max_lambda = tau_grid[np.arange(tau_grid.shape[0]), best_mchi_idx]
+    eft_valid_at_best = eft_valid_grid[np.arange(eft_valid_grid.shape[0]), best_mchi_idx]
+
+    figL, axL = plt.subplots(figsize=(6.0, 4.0))
+    axL.plot(Lambda_grid, np.asarray(tau_max_lambda, dtype=float), lw=2)
+    axL.axhline(float(tau_needed), color="w", ls="--", lw=1, label="Target")
+
+    if meta_text is not None and str(meta_text).strip():
+        axL.text(
+            0.02,
+            0.98,
+            str(meta_text),
+            transform=axL.transAxes,
+            ha="left",
+            va="top",
+            color="w",
+            fontsize=9,
+            bbox={"facecolor": "k", "alpha": 0.35, "edgecolor": "none"},
+        )
+
+    invalid = ~np.asarray(eft_valid_at_best, dtype=bool)
+    if np.any(invalid):
+        invalid_idx = np.where(invalid)[0]
+        blocks = np.split(invalid_idx, np.where(np.diff(invalid_idx) != 1)[0] + 1)
+        first = True
+        for b in blocks:
+            x0 = float(Lambda_grid[int(b[0])])
+            x1 = float(Lambda_grid[int(b[-1])])
+            axL.axvspan(
+                x0,
+                x1,
+                color="tab:orange",
+                alpha=0.15,
+                label="EFT invalid" if first else None,
+            )
+            first = False
+
+    axL.set_xscale("log")
+    axL.set_yscale("log")
+    axL.set_xlabel(r"$\Lambda\,\,[\mathrm{GeV}]$")
+    axL.set_ylabel(rf"$\tau_\max$ ({str(tau_energy_label)})")
+    axL.legend(frameon=False)
+    out_tau = os.path.join(outdir, f"tau_vs_lambda_{str(operator)}_{str(baseline)}.png")
+    figL.tight_layout()
+    plt.savefig(out_tau)
+    plt.close(figL)
+
+    log10_tau = np.log10(np.asarray(tau_grid, dtype=float) + 1e-30)
+
+    figG, axG = plt.subplots(figsize=(6.5, 5.5))
+    x = np.log10(Lambda_grid)
+    y = np.log10(mchi_grid)
+    X, Y = np.meshgrid(x, y, indexing="xy")
+
+    levels = 40
+    im = axG.contourf(
+        X,
+        Y,
+        log10_tau.T,
+        levels=levels,
+        cmap="plasma",
+    )
+    cbar = figG.colorbar(im, ax=axG)
+    cbar.set_label(r"$\log_{10}(\tau_{\max})$")
+
+    if meta_text is not None and str(meta_text).strip():
+        axG.text(
+            0.02,
+            0.02,
+            str(meta_text),
+            transform=axG.transAxes,
+            ha="left",
+            va="bottom",
+            color="w",
+            fontsize=9,
+            bbox={"facecolor": "k", "alpha": 0.35, "edgecolor": "none"},
+            zorder=6,
+        )
+
+    legend_handles = []
+
+    if float(tau_needed) > 0.0:
+        tau_field = np.asarray(tau_grid, dtype=float).T
+        eft_mask = np.asarray(eft_valid_grid, dtype=bool).T
+
+        tau_field_valid = np.ma.masked_where(~eft_mask, tau_field)
+        has_overlap = bool(
+            np.any(
+                (~tau_field_valid.mask)
+                & np.isfinite(np.asarray(tau_field_valid))
+                & (np.asarray(tau_field_valid) >= float(tau_needed))
+            )
+        )
+        if has_overlap:
+            axG.contourf(
+                X,
+                Y,
+                tau_field_valid,
+                levels=[float(tau_needed), float(np.max(tau_field_valid))],
+                colors="none",
+                hatches=["////"],
+                alpha=0.0,
+                zorder=3,
+            )
+            legend_handles.append(
+                Patch(
+                    facecolor="none",
+                    edgecolor="w",
+                    hatch="////",
+                    label=r"EFT-valid + testable ($\tau\geq\tau_{\rm needed}$)",
+                )
+            )
+        else:
+            axG.text(
+                0.02,
+                0.98,
+                "No EFT-valid & testable region",
+                transform=axG.transAxes,
+                ha="left",
+                va="top",
+                color="w",
+                fontsize=10,
+                bbox={"facecolor": "k", "alpha": 0.35, "edgecolor": "none"},
+                zorder=6,
+            )
+
+        axG.contour(
+            X,
+            Y,
+            tau_field,
+            levels=[float(tau_needed)],
+            colors="w",
+            linewidths=2.0,
+            zorder=4,
+        )
+        legend_handles.append(
+            Line2D(
+                [0],
+                [0],
+                color="w",
+                lw=2.0,
+                label=r"Sensitivity boundary ($\tau=\tau_{\rm needed}$)",
+            )
+        )
+
+    axG.contour(
+        X,
+        Y,
+        eft_valid_grid.T.astype(float),
+        levels=[0.5],
+        colors="r",
+        linewidths=1.5,
+        linestyles="--",
+        zorder=5,
+    )
+    legend_handles.append(
+        Line2D(
+            [0],
+            [0],
+            color="r",
+            lw=1.5,
+            ls="--",
+            label="EFT validity limit",
+        )
+    )
+
+    axG.set_xlabel(r"$\log_{10}(\Lambda/\mathrm{GeV})$")
+    axG.set_ylabel(r"$\log_{10}(m_\chi/\mathrm{GeV})$")
+
+    cdm_bound = 1e-3
+    if float(np.min(mchi_grid)) <= float(cdm_bound) <= float(np.max(mchi_grid)):
+        axG.axhline(
+            float(np.log10(cdm_bound)),
+            color="w",
+            lw=1.5,
+            ls=":",
+        )
+        legend_handles.append(
+            Line2D(
+                [0],
+                [0],
+                color="w",
+                lw=1.5,
+                ls=":",
+                label=r"CDM bound ($m_\chi\geq 10^{-3}\,\mathrm{GeV}$)",
+            )
+        )
+
+    if len(legend_handles) > 0:
+        axG.legend(handles=legend_handles, frameon=False, loc="best")
+
+    out_grid = os.path.join(outdir, f"tau_grid_{str(operator)}_{str(baseline)}.png")
+    figG.tight_layout()
+    plt.savefig(out_grid)
+    plt.close(figG)
 
 
 def sigma_tot_params(E_gamma, mchi, c_s, c_p, Lambda, n_theta=300, *, operator=None, fermion_type=None):
@@ -727,6 +972,31 @@ def main():
         help="If set, compute and plot tau_max(Lambda,mchi) grid at c=1.",
     )
     parser.add_argument(
+        "--tau-energy-mode",
+        type=str,
+        default="band",
+        choices=["band", "dip"],
+        help="For --tau-grid: use 'band' (max over an energy band) or 'dip' (single energy at --dip-energy).",
+    )
+    parser.add_argument(
+        "--tau-energy-min",
+        type=float,
+        default=None,
+        help="For --tau-grid with --tau-energy-mode band: minimum energy in GeV (default: min energy in the input data).",
+    )
+    parser.add_argument(
+        "--tau-energy-max",
+        type=float,
+        default=None,
+        help="For --tau-grid with --tau-energy-mode band: maximum energy in GeV (default: max energy in the input data).",
+    )
+    parser.add_argument(
+        "--tau-energy-n",
+        type=int,
+        default=60,
+        help="For --tau-grid with --tau-energy-mode band: number of log-spaced energies in the band.",
+    )
+    parser.add_argument(
         "--log10-Lambda-min",
         type=float,
         default=-1.0,
@@ -894,10 +1164,36 @@ def main():
     sigma_required = float(tau_needed) / float(max(A_def_check, 1e-30))
 
     if bool(args.tau_grid):
-        os.makedirs(args.outdir, exist_ok=True)
+        tau_mode = str(getattr(args, "tau_energy_mode", "band"))
+        if tau_mode == "dip":
+            E_eval = np.asarray([float(args.dip_energy)], dtype=float)
+            tau_energy_label = rf"$E={float(args.dip_energy):g}\,\mathrm{{GeV}}$"
+        else:
+            Emin = float(args.tau_energy_min) if args.tau_energy_min is not None else float(np.min(E_data))
+            Emax = float(args.tau_energy_max) if args.tau_energy_max is not None else float(np.max(E_data))
+            if Emin <= 0.0 or Emax <= 0.0 or Emin >= Emax:
+                raise ValueError(f"Invalid tau energy band: Emin={Emin}, Emax={Emax} (need 0 < Emin < Emax).")
+            nE = int(max(2, getattr(args, "tau_energy_n", 60)))
+            E_eval = np.logspace(np.log10(Emin), np.log10(Emax), nE)
+            tau_energy_label = rf"$\max_{{E\in[{Emin:g},{Emax:g}]\,\mathrm{{GeV}}}}$"
+
+        meta_text = "\n".join(
+            [
+                f"operator={str(OPERATOR)}",
+                f"fermion={str(FERMION_TYPE)}",
+                f"baseline={str(baseline)}",
+                rf"$\rho_\chi={float(RHO_CHI_SETTING):.2e}\ \mathrm{{GeV/cm^3}}$",
+                rf"$L={float(L_SETTING):.2e}\ \mathrm{{cm}}$",
+                rf"$f_\mathrm{{EFT}}={float(args.eft_kinematic_factor):g}$",
+                rf"$\tau_\mathrm{{needed}}={float(tau_needed):.2e}$",
+                rf"dip\ depth={float(dip_depth):g}",
+                f"tau_mode={tau_mode}",
+                rf"{str(tau_energy_label)}",
+            ]
+        )
 
         grid = compute_max_tau_grid(
-            E_target=float(args.dip_energy),
+            E_eval=E_eval,
             rho_chi=float(RHO_CHI_SETTING),
             L_cm=float(L_SETTING),
             omega_max_for_validity=float(np.max(E_data)),
@@ -912,84 +1208,39 @@ def main():
             fermion_type=str(FERMION_TYPE),
         )
 
-        Lambda_grid = np.asarray(grid["Lambda_grid"], dtype=float)
-        mchi_grid = np.asarray(grid["mchi_grid"], dtype=float)
-        tau_grid = np.asarray(grid["tau_grid"], dtype=float)
-        eft_valid_grid = np.asarray(grid["eft_valid_grid"], dtype=bool)
+        plot_tau_grid(
+            Lambda_grid=grid["Lambda_grid"],
+            mchi_grid=grid["mchi_grid"],
+            tau_grid=grid["tau_grid"],
+            eft_valid_grid=grid["eft_valid_grid"],
+            tau_needed=float(tau_needed),
+            tau_energy_label=str(tau_energy_label),
+            outdir=str(args.outdir),
+            operator=str(OPERATOR),
+            baseline=str(baseline),
+            meta_text=str(meta_text),
+        )
 
+        Lambda_grid = np.asarray(grid["Lambda_grid"], dtype=float)
+        tau_grid = np.asarray(grid["tau_grid"], dtype=float)
         best_mchi_idx = np.argmax(tau_grid, axis=1)
         tau_max_lambda = tau_grid[np.arange(tau_grid.shape[0]), best_mchi_idx]
-        eft_valid_at_best = eft_valid_grid[np.arange(eft_valid_grid.shape[0]), best_mchi_idx]
+        min_idx = np.where(np.asarray(tau_max_lambda, dtype=float) >= float(tau_needed))[0]
+        if len(min_idx) > 0:
+            i0 = int(min_idx[0])
+            Lam0 = float(Lambda_grid[i0])
+            mchi0 = float(np.asarray(grid["mchi_grid"], dtype=float)[int(best_mchi_idx[i0])])
+            print("==============================================")
+            print(f"Minimum Lambda with tau_max >= tau_needed in grid: {Lam0:.4e} GeV")
+            print(f"Occurs at mchi ~ {mchi0:.4e} GeV")
+            print("==============================================")
+        else:
+            print("==============================================")
+            print("No Lambda in the scanned grid reaches tau_needed at c=1.")
+            print("==============================================")
 
-        figL, axL = plt.subplots(figsize=(6.0, 4.0))
-        axL.plot(Lambda_grid, np.asarray(tau_max_lambda, dtype=float), lw=2)
-        axL.axhline(float(tau_needed), color="w", ls="--", lw=1)
-
-        invalid = ~np.asarray(eft_valid_at_best, dtype=bool)
-        if np.any(invalid):
-            invalid_idx = np.where(invalid)[0]
-            blocks = np.split(invalid_idx, np.where(np.diff(invalid_idx) != 1)[0] + 1)
-            for b in blocks:
-                x0 = float(Lambda_grid[int(b[0])])
-                x1 = float(Lambda_grid[int(b[-1])])
-                axL.axvspan(x0, x1, color="gray", alpha=0.2)
-
-        axL.set_xscale("log")
-        axL.set_yscale("log")
-        axL.set_xlabel(r"$\Lambda\,\,[\mathrm{GeV}]$")
-        axL.set_ylabel(r"$\tau_{\max}(E_{\rm target})$")
-        out_tau = os.path.join(args.outdir, f"tau_vs_lambda_{OPERATOR}_{baseline}.png")
-        figL.tight_layout()
-        plt.savefig(out_tau)
-        plt.close(figL)
-
-        tau_plot = np.where(tau_grid > 0.0, tau_grid, np.nan)
-        log10_tau = np.log10(tau_plot)
-
-        figG, axG = plt.subplots(figsize=(6.5, 5.5))
-        extent = [
-            float(np.log10(Lambda_grid[0])),
-            float(np.log10(Lambda_grid[-1])),
-            float(np.log10(mchi_grid[0])),
-            float(np.log10(mchi_grid[-1])),
-        ]
-        im = axG.imshow(
-            log10_tau.T,
-            origin="lower",
-            aspect="auto",
-            extent=extent,
-            interpolation="nearest",
-        )
-        cbar = figG.colorbar(im, ax=axG)
-        cbar.set_label(r"$\log_{10}(\tau_{\max})$")
-
-        if float(tau_needed) > 0.0:
-            axG.contour(
-                np.log10(Lambda_grid),
-                np.log10(mchi_grid),
-                log10_tau.T,
-                levels=[float(np.log10(tau_needed))],
-                colors="w",
-                linewidths=1.5,
-            )
-
-        axG.contour(
-            np.log10(Lambda_grid),
-            np.log10(mchi_grid),
-            eft_valid_grid.T.astype(float),
-            levels=[0.5],
-            colors="k",
-            linewidths=1.5,
-        )
-
-        axG.set_xlabel(r"$\log_{10}(\Lambda/\mathrm{GeV})$")
-        axG.set_ylabel(r"$\log_{10}(m_\chi/\mathrm{GeV})$")
-        out_grid = os.path.join(args.outdir, f"tau_grid_{OPERATOR}_{baseline}.png")
-        figG.tight_layout()
-        plt.savefig(out_grid)
-        plt.close(figG)
-
-        return
+        if not bool(args.find_visible):
+            return
 
     if OPERATOR == "dipole_magnetic":
         cs_test, cp_test = 1.0, 0.0
