@@ -2,10 +2,13 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
-from matplotlib.path import Path
-from matplotlib.patches import PathPatch
 import numpy as np
 from helpers.trinity_plotting import set_plot_style
+from helpers.fermi_plotting import (
+    latex_sci,
+    add_hatched_region_from_contour,
+    make_combined_tau_vs_lambda_beamer,
+)
 from scipy.optimize import curve_fit
 from scipy.stats import qmc
 import argparse
@@ -27,81 +30,6 @@ rho_chi_gc = 0.4   # GeV / cm^3
 rho_chi_cosmic = 1.2e-6
 L_gc       = 8.5e3 * 3.086e18  # 8.5 kpc in cm
 L_cosmic   =  12e9 * 0.0003066014 * 3.086e21 
-
-
-def _latex_sci(x, sig=2):
-    x = float(x)
-    if x == 0.0:
-        return r"0"
-    s = f"{x:.{int(sig)}e}"
-    mant, exp = s.split("e")
-    mant = mant.rstrip("0").rstrip(".")
-    exp_i = int(exp)
-    return rf"{mant}\times10^{{{exp_i}}}"
-
-
-def _add_hatched_region_from_contour(
-    *,
-    ax,
-    X,
-    Y,
-    Z,
-    level,
-    upper_level,
-    hatch="////",
-    edgecolor="c",
-    zorder=3,
-    outline_lw=1.5,
-):
-    cf = ax.contourf(
-        X,
-        Y,
-        Z,
-        levels=[float(level), float(upper_level)],
-        colors="none",
-        alpha=0.0,
-        antialiased=False,
-        zorder=zorder,
-    )
-
-    segs = []
-    if hasattr(cf, "allsegs") and len(cf.allsegs) > 0:
-        segs = cf.allsegs[0]
-
-    for seg in segs:
-        if seg is None:
-            continue
-        seg = np.asarray(seg, dtype=float)
-        if seg.ndim != 2 or seg.shape[0] < 3:
-            continue
-        verts = np.vstack([seg, seg[0]])
-        codes = np.full(len(verts), Path.LINETO, dtype=np.uint8)
-        codes[0] = Path.MOVETO
-        codes[-1] = Path.CLOSEPOLY
-        ax.add_patch(
-            PathPatch(
-                Path(verts, codes),
-                facecolor="none",
-                edgecolor=edgecolor,
-                hatch=hatch,
-                linewidth=0.0,
-                zorder=zorder,
-            )
-        )
-
-    ax.contour(
-        X,
-        Y,
-        Z,
-        levels=[float(level)],
-        colors=edgecolor,
-        linewidths=float(outline_lw),
-        zorder=zorder + 1,
-    )
-
-# Unit conversions
-HC2_GEV2_TO_M2 = 3.89379e-32   # 1 GeV^-2 = 3.89379e-32 m^2
-GEV2_TO_FB     = 3.89379e11    # 1 GeV^-2 = 3.89379e11 fb
 
 
 VERBOSE_DSIGMA = False
@@ -345,7 +273,7 @@ def plot_tau_grid(
     plot_text_fs = 9
 
     figL = plt.figure(figsize=(9.5, 4.0), constrained_layout=True)
-    gsL = figL.add_gridspec(1, 2, width_ratios=[4.2, 1.8], wspace=0.18)
+    gsL = figL.add_gridspec(1, 2, width_ratios=[4.2, 1.8], wspace=0.10)
     axL = figL.add_subplot(gsL[0, 0])
     axLtxt = figL.add_subplot(gsL[0, 1])
     axLtxt.axis("off")
@@ -365,17 +293,17 @@ def plot_tau_grid(
 
     side_text = str(meta_text) if (meta_text is not None) else ""
     if mchi_best_is_constant and (mchi_best_const_val is not None):
-        extra = rf"$m_{{\chi,\,\mathrm{{best}}}}\approx {_latex_sci(mchi_best_const_val)}\ \mathrm{{GeV}}$"
+        extra = rf"$m_{{\chi,\,\mathrm{{best}}}}\approx {latex_sci(mchi_best_const_val)}\ \mathrm{{GeV}}$"
         side_text = (side_text + "\n" + extra) if side_text.strip() else extra
 
     if side_text.strip():
         axLtxt.text(
             0.0,
-            1.0,
+            0.5,
             side_text,
             transform=axLtxt.transAxes,
             ha="left",
-            va="top",
+            va="center",
             color="w",
             fontsize=plot_text_fs,
         )
@@ -417,7 +345,7 @@ def plot_tau_grid(
     log10_tau = np.log10(np.asarray(tau_grid, dtype=float) + 1e-30)
 
     figG = plt.figure(figsize=(9.5, 5.5))
-    gsG = figG.add_gridspec(1, 2, width_ratios=[4.9, 1.6], wspace=0.05)
+    gsG = figG.add_gridspec(1, 2, width_ratios=[4.9, 1.6], wspace=0.12)
     axG = figG.add_subplot(gsG[0, 0])
     axGtxt = figG.add_subplot(gsG[0, 1])
     axGtxt.axis("off")
@@ -439,11 +367,11 @@ def plot_tau_grid(
     if meta_text is not None and str(meta_text).strip():
         axGtxt.text(
             0.0,
-            1.0,
+            0.5,
             str(meta_text),
             transform=axGtxt.transAxes,
             ha="left",
-            va="top",
+            va="center",
             color="w",
             fontsize=plot_text_fs,
         )
@@ -470,7 +398,7 @@ def plot_tau_grid(
             )
         )
         if has_overlap:
-            _add_hatched_region_from_contour(
+            add_hatched_region_from_contour(
                 ax=axG,
                 X=X,
                 Y=Y,
@@ -584,6 +512,78 @@ def plot_tau_grid(
     figG.tight_layout()
     plt.savefig(out_grid)
     plt.close(figG)
+
+
+def make_combined_tau_vs_lambda_beamer(
+    *,
+    baseline,
+    E_eval,
+    tau_energy_label,
+    tau_needed,
+    rho_chi,
+    L_cm,
+    omega_max_for_validity,
+    eft_kinematic_factor,
+    log10_Lambda_min,
+    log10_Lambda_max,
+    log10_mchi_min,
+    log10_mchi_max,
+    n_Lambda,
+    n_mchi,
+    outdir,
+    header_text,
+):
+    os.makedirs(outdir, exist_ok=True)
+
+    fig, ax = plt.subplots(
+        1,
+        1,
+        figsize=(10.5, 4.5),
+        constrained_layout=False,
+    )
+
+    fig.text(
+        0.5,
+        0.98,
+        str(header_text),
+        ha="center",
+        va="top",
+        fontsize=10,
+        color="k",
+    )
+
+    grid = compute_max_tau_grid(
+        E_eval=np.asarray(E_eval, dtype=float),
+        rho_chi=float(rho_chi),
+        L_cm=float(L_cm),
+        omega_max_for_validity=float(omega_max_for_validity),
+        eft_kinematic_factor=float(eft_kinematic_factor),
+        log10_Lambda_min=float(log10_Lambda_min),
+        log10_Lambda_max=float(log10_Lambda_max),
+        log10_mchi_min=float(log10_mchi_min),
+        log10_mchi_max=float(log10_mchi_max),
+        n_Lambda=int(n_Lambda),
+        n_mchi=int(n_mchi),
+    )
+
+    Lambda_grid = np.asarray(grid["Lambda_grid"], dtype=float)
+    tau_grid = np.asarray(grid["tau_grid"], dtype=float)
+    best_mchi_idx = np.argmax(tau_grid, axis=1)
+    tau_max_lambda = tau_grid[np.arange(tau_grid.shape[0]), best_mchi_idx]
+
+    ax.plot(Lambda_grid, np.asarray(tau_max_lambda, dtype=float), lw=2)
+    ax.axhline(float(tau_needed), color="k", ls="--", lw=1)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_title("rayleigh_scalar", fontsize=12)
+    ax.set_xlabel(r"$\Lambda\,[\mathrm{GeV}]$")
+    ax.set_ylabel(rf"$\tau_\max$ ({str(tau_energy_label)})")
+
+    fig.subplots_adjust(top=0.88)
+    out_base = os.path.join(outdir, f"combined_limits_tau_vs_lambda_scalar_{str(baseline)}")
+    fig.savefig(out_base + ".png", dpi=200)
+    fig.savefig(out_base + ".pdf")
+    plt.close(fig)
 
 
 def find_visible_params_fixed_lambda(
@@ -790,6 +790,11 @@ def main():
         help="If set, compute and plot tau_max(Lambda,mchi) grid at c_phi=1.",
     )
     parser.add_argument(
+        "--combined-limits",
+        action="store_true",
+        help="If set, make beamer-ready combined tau_vs_lambda plot(s).",
+    )
+    parser.add_argument(
         "--tau-energy-mode",
         type=str,
         default="band",
@@ -937,6 +942,69 @@ def main():
     dip_depth = float(args.dip_depth)
     dip_depth = min(max(dip_depth, 0.0), 0.999999)
     tau_needed = -np.log(1.0 - dip_depth) if dip_depth > 0 else 0.0
+
+    if bool(args.combined_limits):
+        os.makedirs(args.outdir, exist_ok=True)
+
+        tau_mode = str(getattr(args, "tau_energy_mode", "band"))
+        if tau_mode == "dip":
+            E_eval = np.asarray([float(args.dip_energy)], dtype=float)
+            tau_energy_label = rf"$E={float(args.dip_energy):g}\,\mathrm{{GeV}}$"
+        else:
+            Emin = float(args.tau_energy_min) if args.tau_energy_min is not None else float(np.min(E_data))
+            Emax = float(args.tau_energy_max) if args.tau_energy_max is not None else float(np.max(E_data))
+            if Emin <= 0.0 or Emax <= 0.0 or Emin >= Emax:
+                raise ValueError(f"Invalid tau energy band: Emin={Emin}, Emax={Emax} (need 0 < Emin < Emax).")
+            nE = int(max(2, getattr(args, "tau_energy_n", 60)))
+            E_eval = np.logspace(np.log10(Emin), np.log10(Emax), nE)
+            tau_energy_label = rf"$\max_{{E\in[{Emin:g},{Emax:g}]\,\mathrm{{GeV}}}}$"
+
+        header_text = "  ".join(
+            [
+                rf"baseline={str(baseline)}",
+                rf"$\rho_\chi={latex_sci(RHO_CHI_SETTING)}\,\mathrm{{GeV/cm^3}}$",
+                rf"$L={latex_sci(L_SETTING)}\,\mathrm{{cm}}$",
+                rf"$f_\mathrm{{EFT}}={float(args.eft_kinematic_factor):g}$",
+                rf"$\tau_\mathrm{{needed}}={latex_sci(tau_needed)}$",
+                rf"dip\ depth={float(dip_depth):g}",
+                rf"{str(tau_energy_label)}",
+            ]
+        )
+
+        def _compute_curve(_op):
+            grid = compute_max_tau_grid(
+                E_eval=np.asarray(E_eval, dtype=float),
+                rho_chi=float(RHO_CHI_SETTING),
+                L_cm=float(L_SETTING),
+                omega_max_for_validity=float(np.max(E_data)),
+                eft_kinematic_factor=float(args.eft_kinematic_factor),
+                log10_Lambda_min=float(getattr(args, "log10_Lambda_min")),
+                log10_Lambda_max=float(getattr(args, "log10_Lambda_max")),
+                log10_mchi_min=float(args.log10_mchi_min),
+                log10_mchi_max=float(args.log10_mchi_max),
+                n_Lambda=int(getattr(args, "tau_grid_n_lambda")),
+                n_mchi=int(getattr(args, "tau_grid_n_mchi")),
+            )
+            Lambda_grid = np.asarray(grid["Lambda_grid"], dtype=float)
+            tau_grid = np.asarray(grid["tau_grid"], dtype=float)
+            best_mchi_idx = np.argmax(tau_grid, axis=1)
+            tau_max_lambda = tau_grid[np.arange(tau_grid.shape[0]), best_mchi_idx]
+            return Lambda_grid, tau_max_lambda
+
+        make_combined_tau_vs_lambda_beamer(
+            operators=["rayleigh_scalar"],
+            compute_curve=_compute_curve,
+            tau_needed=float(tau_needed),
+            tau_energy_label=str(tau_energy_label),
+            out_base=os.path.join(
+                str(args.outdir),
+                f"combined_limits_tau_vs_lambda_scalar_{str(baseline)}",
+            ),
+            header_text=str(header_text),
+            ncols=1,
+        )
+
+        return
 
     if bool(args.tau_grid):
         os.makedirs(args.outdir, exist_ok=True)

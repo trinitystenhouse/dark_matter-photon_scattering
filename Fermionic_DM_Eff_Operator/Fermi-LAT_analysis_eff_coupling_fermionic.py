@@ -2,10 +2,14 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
-from matplotlib.path import Path
-from matplotlib.patches import PathPatch
 import numpy as np
 from helpers.trinity_plotting import set_plot_style
+from helpers.fermi_plotting import (
+    latex_sci,
+    add_hatched_region_from_contour,
+    operator_title,
+    make_combined_tau_vs_lambda_beamer,
+)
 from scipy.optimize import curve_fit
 from scipy.stats import qmc
 import argparse
@@ -36,77 +40,6 @@ L_cosmic   =  12e9 * 0.0003066014 * 3.086e21
 HC2_GEV2_TO_M2 = 3.89379e-32   # 1 GeV^-2 = 3.89379e-32 m^2
 GEV2_TO_FB     = 3.89379e11    # 1 GeV^-2 = 3.89379e11 fb
 ALPHA_EM = 1.0 / 137.035999084
-
-
-def _latex_sci(x, sig=2):
-    x = float(x)
-    if x == 0.0:
-        return r"0"
-    s = f"{x:.{int(sig)}e}"
-    mant, exp = s.split("e")
-    mant = mant.rstrip("0").rstrip(".")
-    exp_i = int(exp)
-    return rf"{mant}\times10^{{{exp_i}}}"
-
-
-def _add_hatched_region_from_contour(
-    *,
-    ax,
-    X,
-    Y,
-    Z,
-    level,
-    upper_level,
-    hatch="////",
-    edgecolor="c",
-    zorder=3,
-    outline_lw=1.5,
-):
-    cf = ax.contourf(
-        X,
-        Y,
-        Z,
-        levels=[float(level), float(upper_level)],
-        colors="none",
-        alpha=0.0,
-        antialiased=False,
-        zorder=zorder,
-    )
-
-    segs = []
-    if hasattr(cf, "allsegs") and len(cf.allsegs) > 0:
-        segs = cf.allsegs[0]
-
-    for seg in segs:
-        if seg is None:
-            continue
-        seg = np.asarray(seg, dtype=float)
-        if seg.ndim != 2 or seg.shape[0] < 3:
-            continue
-        verts = np.vstack([seg, seg[0]])
-        codes = np.full(len(verts), Path.LINETO, dtype=np.uint8)
-        codes[0] = Path.MOVETO
-        codes[-1] = Path.CLOSEPOLY
-        ax.add_patch(
-            PathPatch(
-                Path(verts, codes),
-                facecolor="none",
-                edgecolor=edgecolor,
-                hatch=hatch,
-                linewidth=0.0,
-                zorder=zorder,
-            )
-        )
-
-    ax.contour(
-        X,
-        Y,
-        Z,
-        levels=[float(level)],
-        colors=edgecolor,
-        linewidths=float(outline_lw),
-        zorder=zorder + 1,
-    )
 
 
 VERBOSE_DSIGMA = False
@@ -336,6 +269,7 @@ def plot_tau_grid(
     tau_energy_label,
     outdir,
     operator,
+    fermion_type=None,
     baseline,
     meta_text=None,
 ):
@@ -364,6 +298,8 @@ def plot_tau_grid(
         Optional multi-line string to draw onto the plots listing run constants.
     """
 
+    if fermion_type is None:
+        fermion_type = FERMION_TYPE
     Lambda_grid = np.asarray(Lambda_grid, dtype=float)
     mchi_grid = np.asarray(mchi_grid, dtype=float)
     tau_grid = np.asarray(tau_grid, dtype=float)
@@ -391,7 +327,7 @@ def plot_tau_grid(
     plot_text_fs = 9
 
     figL = plt.figure(figsize=(9.5, 4.0), constrained_layout=True)
-    gsL = figL.add_gridspec(1, 2, width_ratios=[4.2, 1.8], wspace=0.18)
+    gsL = figL.add_gridspec(1, 2, width_ratios=[4.2, 1.8], wspace=0.10)
     axL = figL.add_subplot(gsL[0, 0])
     axLtxt = figL.add_subplot(gsL[0, 1])
     axLtxt.axis("off")
@@ -411,17 +347,17 @@ def plot_tau_grid(
 
     side_text = str(meta_text) if (meta_text is not None) else ""
     if mchi_best_is_constant and (mchi_best_const_val is not None):
-        extra = rf"$m_{{\chi,\,\mathrm{{best}}}}\approx {_latex_sci(mchi_best_const_val)}\ \mathrm{{GeV}}$"
+        extra = rf"$m_{{\chi,\,\mathrm{{best}}}}\approx {latex_sci(mchi_best_const_val)}\ \mathrm{{GeV}}$"
         side_text = (side_text + "\n" + extra) if side_text.strip() else extra
 
     if side_text.strip():
         axLtxt.text(
             0.0,
-            1.0,
+            0.5,
             side_text,
             transform=axLtxt.transAxes,
             ha="left",
-            va="top",
+            va="center",
             color="w",
             fontsize=plot_text_fs,
         )
@@ -456,14 +392,17 @@ def plot_tau_grid(
         axL.legend(handles=(h1 + h2), labels=(l1 + l2), frameon=False)
     else:
         axL.legend(handles=h1, labels=l1, frameon=False)
-    out_tau = os.path.join(outdir, f"tau_vs_lambda_{str(operator)}_{str(baseline)}.png")
+    out_tau = os.path.join(
+        outdir,
+        f"tau_vs_lambda_{str(operator)}_{str(fermion_type)}_{str(baseline)}.png",
+    )
     plt.savefig(out_tau)
     plt.close(figL)
 
     log10_tau = np.log10(np.asarray(tau_grid, dtype=float) + 1e-30)
 
     figG = plt.figure(figsize=(9.5, 5.5))
-    gsG = figG.add_gridspec(1, 2, width_ratios=[4.9, 1.6], wspace=0.05)
+    gsG = figG.add_gridspec(1, 2, width_ratios=[4.9, 1.6], wspace=0.12)
     axG = figG.add_subplot(gsG[0, 0])
     axGtxt = figG.add_subplot(gsG[0, 1])
     axGtxt.axis("off")
@@ -485,11 +424,11 @@ def plot_tau_grid(
     if meta_text is not None and str(meta_text).strip():
         axGtxt.text(
             0.0,
-            1.0,
+            0.5,
             str(meta_text),
             transform=axGtxt.transAxes,
             ha="left",
-            va="top",
+            va="center",
             color="w",
             fontsize=plot_text_fs,
         )
@@ -521,7 +460,7 @@ def plot_tau_grid(
         )
         if has_overlap:
             tau_max_valid = float(np.max(tau_field_valid))
-            _add_hatched_region_from_contour(
+            add_hatched_region_from_contour(
                 ax=axG,
                 X=X,
                 Y=Y,
@@ -1115,6 +1054,11 @@ def main():
         help="If set, compute and plot tau_max(Lambda,mchi) grid at c=1.",
     )
     parser.add_argument(
+        "--combined-limits",
+        action="store_true",
+        help="If set, make beamer-ready combined multi-panel tau_vs_lambda plots over operators.",
+    )
+    parser.add_argument(
         "--tau-energy-mode",
         type=str,
         default="band",
@@ -1306,6 +1250,70 @@ def main():
     A_def_check = float(RHO_CHI_SETTING) * float(L_SETTING) / float(max(mchi, 1e-30))
     sigma_required = float(tau_needed) / float(max(A_def_check, 1e-30))
 
+    if bool(args.combined_limits):
+        tau_mode = str(getattr(args, "tau_energy_mode", "band"))
+        if tau_mode == "dip":
+            E_eval = np.asarray([float(args.dip_energy)], dtype=float)
+            tau_energy_label = rf"$E={float(args.dip_energy):g}\,\mathrm{{GeV}}$"
+        else:
+            Emin = float(args.tau_energy_min) if args.tau_energy_min is not None else float(np.min(E_data))
+            Emax = float(args.tau_energy_max) if args.tau_energy_max is not None else float(np.max(E_data))
+            if Emin <= 0.0 or Emax <= 0.0 or Emin >= Emax:
+                raise ValueError(f"Invalid tau energy band: Emin={Emin}, Emax={Emax} (need 0 < Emin < Emax).")
+            nE = int(max(2, getattr(args, "tau_energy_n", 60)))
+            E_eval = np.logspace(np.log10(Emin), np.log10(Emax), nE)
+            tau_energy_label = rf"$\max_{{E\in[{Emin:g},{Emax:g}]\,\mathrm{{GeV}}}}$"
+
+        header_text = "  ".join(
+            [
+                rf"baseline={str(baseline)}",
+                rf"$\rho_\chi={latex_sci(RHO_CHI_SETTING)}\,\mathrm{{GeV/cm^3}}$",
+                rf"$L={latex_sci(L_SETTING)}\,\mathrm{{cm}}$",
+                rf"$f_\mathrm{{EFT}}={float(args.eft_kinematic_factor):g}$",
+                rf"$\tau_\mathrm{{needed}}={latex_sci(tau_needed)}$",
+                rf"dip\ depth={float(dip_depth):g}",
+                rf"{str(tau_energy_label)}",
+            ]
+        )
+
+        operators = [
+            "rayleigh_even",
+            "rayleigh_odd",
+            "rayleigh_full",
+            "dipole_magnetic",
+            "dipole_electric",
+            "charge_radius",
+            "anapole",
+        ]
+
+        for ft in ["dirac", "majorana"]:
+            ops_ft = list(operators)
+            if str(ft) == "majorana":
+                ops_ft = [o for o in ops_ft if o not in ["dipole_magnetic", "dipole_electric"]]
+
+            make_combined_tau_vs_lambda_beamer(
+                operators=ops_ft,
+                fermion_type=str(ft),
+                baseline=str(baseline),
+                E_eval=np.asarray(E_eval, dtype=float),
+                tau_energy_label=str(tau_energy_label),
+                tau_needed=float(tau_needed),
+                rho_chi=float(RHO_CHI_SETTING),
+                L_cm=float(L_SETTING),
+                omega_max_for_validity=float(np.max(E_data)),
+                eft_kinematic_factor=float(args.eft_kinematic_factor),
+                log10_Lambda_min=float(getattr(args, "log10_Lambda_min")),
+                log10_Lambda_max=float(getattr(args, "log10_Lambda_max")),
+                log10_mchi_min=float(args.log10_mchi_min),
+                log10_mchi_max=float(args.log10_mchi_max),
+                n_Lambda=int(getattr(args, "tau_grid_n_lambda")),
+                n_mchi=int(getattr(args, "tau_grid_n_mchi")),
+                outdir=str(args.outdir),
+                header_text=str(header_text),
+            )
+
+        return
+
     if bool(args.tau_grid):
         tau_mode = str(getattr(args, "tau_energy_mode", "band"))
         if tau_mode == "dip":
@@ -1327,10 +1335,10 @@ def main():
                 f"baseline={str(baseline)}",
                 rf"$m_\chi\in[10^{{{float(args.log10_mchi_min):g}}},10^{{{float(args.log10_mchi_max):g}}}]\ \mathrm{{GeV}}$",
                 r"$\tau_{\max}(\Lambda)=\max_{m_\chi}\,\tau_{\max}(\Lambda,m_\chi)$",
-                rf"$\rho_\chi={_latex_sci(RHO_CHI_SETTING)}\ \mathrm{{GeV/cm^3}}$",
-                rf"$L={_latex_sci(L_SETTING)}\ \mathrm{{cm}}$",
+                rf"$\rho_\chi={latex_sci(RHO_CHI_SETTING)}\ \mathrm{{GeV/cm^3}}$",
+                rf"$L={latex_sci(L_SETTING)}\ \mathrm{{cm}}$",
                 rf"$f_\mathrm{{EFT}}={float(args.eft_kinematic_factor):g}$",
-                rf"$\tau_\mathrm{{needed}}={_latex_sci(tau_needed)}$",
+                rf"$\tau_\mathrm{{needed}}={latex_sci(tau_needed)}$",
                 rf"dip\ depth={float(dip_depth):g}",
                 f"tau_mode={tau_mode}",
                 rf"{str(tau_energy_label)}",
@@ -1362,6 +1370,7 @@ def main():
             tau_energy_label=str(tau_energy_label),
             outdir=str(args.outdir),
             operator=str(OPERATOR),
+            fermion_type=str(FERMION_TYPE),
             baseline=str(baseline),
             meta_text=str(meta_text),
         )
