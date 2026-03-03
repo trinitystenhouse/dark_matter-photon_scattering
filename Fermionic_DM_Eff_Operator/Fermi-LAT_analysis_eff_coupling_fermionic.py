@@ -56,15 +56,27 @@ def _add_hatched_region_from_contour(
     Y,
     Z,
     level,
+    upper_level,
     hatch="////",
     edgecolor="c",
     zorder=3,
     outline_lw=1.5,
 ):
-    cs = ax.contour(X, Y, Z, levels=[float(level)], colors="none", linewidths=0.0)
+    cf = ax.contourf(
+        X,
+        Y,
+        Z,
+        levels=[float(level), float(upper_level)],
+        colors="none",
+        alpha=0.0,
+        antialiased=False,
+        zorder=zorder,
+    )
+
     segs = []
-    if hasattr(cs, "allsegs") and len(cs.allsegs) > 0:
-        segs = cs.allsegs[0]
+    if hasattr(cf, "allsegs") and len(cf.allsegs) > 0:
+        segs = cf.allsegs[0]
+
     for seg in segs:
         if seg is None:
             continue
@@ -75,15 +87,16 @@ def _add_hatched_region_from_contour(
         codes = np.full(len(verts), Path.LINETO, dtype=np.uint8)
         codes[0] = Path.MOVETO
         codes[-1] = Path.CLOSEPOLY
-        patch = PathPatch(
-            Path(verts, codes),
-            facecolor="none",
-            edgecolor=edgecolor,
-            hatch=hatch,
-            linewidth=0.0,
-            zorder=zorder,
+        ax.add_patch(
+            PathPatch(
+                Path(verts, codes),
+                facecolor="none",
+                edgecolor=edgecolor,
+                hatch=hatch,
+                linewidth=0.0,
+                zorder=zorder,
+            )
         )
-        ax.add_patch(patch)
 
     ax.contour(
         X,
@@ -494,6 +507,12 @@ def plot_tau_grid(
             tau_field,
         )
 
+        overlap = (
+            np.asarray(eft_mask, dtype=bool)
+            & np.isfinite(np.asarray(tau_field, dtype=float))
+            & (np.asarray(tau_field, dtype=float) >= float(tau_needed))
+        )
+
         has_overlap = bool(
             np.any(
                 (~tau_field_valid.mask)
@@ -506,8 +525,9 @@ def plot_tau_grid(
                 ax=axG,
                 X=X,
                 Y=Y,
-                Z=tau_field_valid,
-                level=float(tau_needed),
+                Z=overlap.astype(float),
+                level=0.5,
+                upper_level=1.5,
                 hatch="////",
                 edgecolor="c",
                 zorder=3,
@@ -536,11 +556,15 @@ def plot_tau_grid(
                 zorder=6,
             )
 
+        tau_ge_needed = (
+            np.isfinite(np.asarray(tau_field, dtype=float))
+            & (np.asarray(tau_field, dtype=float) >= float(tau_needed))
+        )
         axG.contour(
             X,
             Y,
-            tau_field,
-            levels=[float(tau_needed)],
+            tau_ge_needed.astype(float),
+            levels=[0.5],
             colors="w",
             linewidths=2.0,
             zorder=4,
