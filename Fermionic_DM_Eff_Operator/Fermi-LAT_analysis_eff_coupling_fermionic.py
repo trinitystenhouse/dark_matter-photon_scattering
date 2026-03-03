@@ -21,7 +21,7 @@ C_P = None
 rho_chi_gc = 0.4   # GeV / cm^3
 rho_chi_cosmic = 1.2e-6
 L_gc       = 8.5e3 * 3.086e18  # 8.5 kpc in cm
-L_cosmic   = 12e9 * 0.0003066014 * 3.086e18 
+L_cosmic = 12e9 * 0.3066014 * 3.086e18   # cm
 
 # Unit conversions
 HC2_GEV2_TO_M2 = 3.89379e-32   # 1 GeV^-2 = 3.89379e-32 m^2
@@ -148,6 +148,11 @@ def find_visible_params_fixed_lambda(
     L_cm,
     omega_max_for_validity,
     eft_kinematic_factor,
+    mchi_min_gev,
+    mchi_max_gev,
+    cs_max,
+    cp_max,
+    require_cold_dm,
     log10_mchi_min,
     log10_mchi_max,
     log10_cs_min,
@@ -166,6 +171,35 @@ def find_visible_params_fixed_lambda(
     best_visible = None
     best_any = None
 
+    mchi_min_gev = float(mchi_min_gev)
+    mchi_max_gev = float(mchi_max_gev)
+    cs_max = float(cs_max)
+    cp_max = float(cp_max)
+    require_cold_dm = bool(require_cold_dm)
+
+    log10_mchi_min = max(float(log10_mchi_min), float(np.log10(max(mchi_min_gev, 1e-30))))
+    log10_mchi_max = min(float(log10_mchi_max), float(np.log10(max(mchi_max_gev, 1e-30))))
+    log10_cs_max = min(float(log10_cs_max), float(np.log10(max(cs_max, 1e-30))))
+    log10_cp_max = min(float(log10_cp_max), float(np.log10(max(cp_max, 1e-30))))
+
+    if float(log10_mchi_min) > float(log10_mchi_max):
+        return None
+    if float(log10_cs_min) > float(log10_cs_max):
+        return None
+    if float(log10_cp_min) > float(log10_cp_max):
+        return None
+
+    E_low_default = 10.0
+    E_high = float(omega_max_for_validity)
+    E_data_min = None
+    try:
+        E_data_global = globals().get("E_data", None)
+        if E_data_global is not None:
+            E_data_min = float(np.min(np.asarray(E_data_global, dtype=float)))
+    except Exception:
+        E_data_min = None
+    E_low = max(float(E_data_min) if E_data_min is not None else float(E_low_default), 10.0)
+
     for _ in range(int(n_samples)):
         log10_mchi = rng.uniform(float(log10_mchi_min), float(log10_mchi_max))
         log10_cs = rng.uniform(float(log10_cs_min), float(log10_cs_max))
@@ -175,6 +209,13 @@ def find_visible_params_fixed_lambda(
         cs = 10.0**log10_cs
         cp = 10.0**log10_cp
 
+        if float(mchi) < float(mchi_min_gev) or float(mchi) > float(mchi_max_gev):
+            continue
+        if float(cs) > float(cs_max) or float(cp) > float(cp_max):
+            continue
+        if require_cold_dm and float(mchi) < 1e-3:
+            continue
+
         if not eft_valid_kinematics_lab(mchi, Lambda, omega_max_for_validity, eft_kinematic_factor):
             continue
 
@@ -182,12 +223,30 @@ def find_visible_params_fixed_lambda(
         if not np.isfinite(sigma_cm2) or sigma_cm2 <= 0:
             continue
 
-        A_def = float(rho_chi) * float(L_cm) / float(mchi)
-        tau = A_def * float(sigma_cm2)
+        sigma_cm2_low = sigma_tot_params_cm2(float(E_low), float(mchi), float(cs), float(cp), float(Lambda))
+        if not np.isfinite(sigma_cm2_low) or sigma_cm2_low <= 0:
+            continue
 
-        margin = float(tau) - float(tau_needed)
-        complexity = (log10_cs**2 + log10_cp**2)
-        score = float(margin) - 0.05 * float(complexity)
+        sigma_cm2_high = sigma_tot_params_cm2(float(E_high), float(mchi), float(cs), float(cp), float(Lambda))
+        if not np.isfinite(sigma_cm2_high) or sigma_cm2_high <= 0:
+            continue
+
+        A_def = float(rho_chi) * float(L_cm) / float(mchi)
+        tau_target = float(A_def) * float(sigma_cm2)
+        tau_low = float(A_def) * float(sigma_cm2_low)
+        tau_high = float(A_def) * float(sigma_cm2_high)
+
+        tau_target_floor = max(float(tau_target), 1e-30)
+        tau_needed_floor = max(float(tau_needed), 1e-30)
+
+        target_term = -float(np.log(tau_target_floor / tau_needed_floor) ** 2)
+        low_pen = -50.0 * float(max(0.0, float(tau_low) - 1e-3) ** 2)
+        high_pen = -0.2 * float(max(0.0, float(tau_high) - 5.0) ** 2)
+
+        complexity = float(max(0.0, float(np.log10(cs))) ** 2 + max(0.0, float(np.log10(cp))) ** 2)
+        comp_pen = -0.1 * float(complexity)
+
+        score = float(target_term + low_pen + high_pen + comp_pen)
 
         cand = {
             "mchi": float(mchi),
@@ -195,14 +254,15 @@ def find_visible_params_fixed_lambda(
             "c_p": float(cp),
             "Lambda": float(Lambda),
             "sigma_cm2": float(sigma_cm2),
+            "tau_low": float(tau_low),
+            "tau_high": float(tau_high),
             "A_def": float(A_def),
-            "tau": float(tau),
+            "tau": float(tau_target),
             "tau_needed": float(tau_needed),
-            "margin": float(margin),
             "score": float(score),
         }
         cand_any = dict(cand)
-        cand_any["meets_visibility"] = bool(tau_needed <= 0 or margin >= 0.0)
+        cand_any["meets_visibility"] = bool(float(tau_needed) <= 0.0 or float(tau_target) >= float(tau_needed))
 
         if best_any is None or cand_any["score"] > best_any["score"]:
             best_any = cand_any
@@ -307,6 +367,41 @@ def main():
         help="Dark matter mass in GeV (used if --find-visible not set).",
     )
     parser.add_argument(
+        "--mchi-min-gev",
+        type=float,
+        default=1e-6,
+        help="Physics prior: minimum DM mass (GeV) allowed in scan.",
+    )
+    parser.add_argument(
+        "--mchi-max-gev",
+        type=float,
+        default=1e6,
+        help="Physics prior: maximum DM mass (GeV) allowed in scan.",
+    )
+    parser.add_argument(
+        "--cs-max",
+        type=float,
+        default=1.0,
+        help="Physics prior: maximum c_s allowed in scan.",
+    )
+    parser.add_argument(
+        "--cp-max",
+        type=float,
+        default=1.0,
+        help="Physics prior: maximum c_p allowed in scan.",
+    )
+    parser.add_argument(
+        "--lambda-min",
+        type=float,
+        default=1.0,
+        help="Physics prior: minimum EFT scale Lambda (GeV) allowed.",
+    )
+    parser.add_argument(
+        "--require-cold-dm",
+        action="store_true",
+        help="If set, require mchi >= 1e-3 GeV (MeV) in scan.",
+    )
+    parser.add_argument(
         "--dip-energy",
         type=float,
         default=175.0,
@@ -396,6 +491,11 @@ def main():
     global LAMBDA, C_S, C_P
 
     LAMBDA = float(args.Lambda)
+    if float(LAMBDA) < float(args.lambda_min):
+        raise ValueError(
+            f"Lambda={float(LAMBDA):.6e} GeV is below --lambda-min={float(args.lambda_min):.6e} GeV. "
+            "Increase --Lambda or lower --lambda-min."
+        )
     C_S = float(args.c_s)
     C_P = float(args.c_p)
     mchi = float(args.mchi)
@@ -456,6 +556,11 @@ def main():
             L_cm=float(L_SETTING),
             omega_max_for_validity=float(np.max(E_data)),
             eft_kinematic_factor=float(args.eft_kinematic_factor),
+            mchi_min_gev=float(args.mchi_min_gev),
+            mchi_max_gev=float(args.mchi_max_gev),
+            cs_max=float(args.cs_max),
+            cp_max=float(args.cp_max),
+            require_cold_dm=bool(args.require_cold_dm),
             log10_mchi_min=float(args.log10_mchi_min),
             log10_mchi_max=float(args.log10_mchi_max),
             log10_cs_min=float(args.log10_cs_min),
