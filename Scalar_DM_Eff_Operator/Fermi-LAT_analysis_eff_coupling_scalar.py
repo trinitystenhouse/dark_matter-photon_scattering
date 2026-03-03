@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from helpers.trinity_plotting import set_plot_style
 from scipy.optimize import curve_fit
+from scipy.stats import qmc
 import argparse
 import os
 
@@ -20,7 +21,7 @@ C_PHI = None
 rho_chi_gc = 0.4   # GeV / cm^3
 rho_chi_cosmic = 1.2e-6
 L_gc       = 8.5e3 * 3.086e18  # 8.5 kpc in cm
-L_cosmic   = 12e9 * 0.0003066014 * 3.086e18 
+L_cosmic   =  12e9 * 0.0003066014 * 3.086e21 
 
 # Unit conversions
 HC2_GEV2_TO_M2 = 3.89379e-32   # 1 GeV^-2 = 3.89379e-32 m^2
@@ -118,6 +119,79 @@ def eft_valid_kinematics_lab(mchi, Lambda, omega_max, eft_kinematic_factor):
     return (Lambda**2) >= (float(eft_kinematic_factor) * q2_max)
 
 
+def compute_max_tau_grid(
+    *,
+    E_target,
+    rho_chi,
+    L_cm,
+    omega_max_for_validity,
+    eft_kinematic_factor,
+    log10_Lambda_min,
+    log10_Lambda_max,
+    log10_mchi_min,
+    log10_mchi_max,
+    n_Lambda=40,
+    n_mchi=40,
+    operator=None,
+    fermion_type=None,
+):
+    """
+    Compute tau_max(Lambda, mchi) on a 2D grid at c=1 (maximum coupling).
+
+    Returns a dict with keys:
+        'Lambda_grid'   : 1D array, shape (n_Lambda,)
+        'mchi_grid'     : 1D array, shape (n_mchi,)
+        'tau_grid'      : 2D array, shape (n_Lambda, n_mchi)
+        'eft_valid_grid': 2D bool array, shape (n_Lambda, n_mchi)
+    """
+
+    log10_Lambda_min = float(log10_Lambda_min)
+    log10_Lambda_max = float(log10_Lambda_max)
+    log10_mchi_min = float(log10_mchi_min)
+    log10_mchi_max = float(log10_mchi_max)
+
+    Lambda_grid = np.logspace(log10_Lambda_min, log10_Lambda_max, int(n_Lambda))
+    mchi_grid = np.logspace(log10_mchi_min, log10_mchi_max, int(n_mchi))
+
+    tau_grid = np.zeros((int(n_Lambda), int(n_mchi)), dtype=float)
+    eft_valid_grid = np.zeros((int(n_Lambda), int(n_mchi)), dtype=bool)
+
+    for iL, Lam in enumerate(Lambda_grid):
+        Lam = float(Lam)
+        for im, mchi in enumerate(mchi_grid):
+            mchi = float(mchi)
+            is_valid = eft_valid_kinematics_lab(
+                mchi,
+                Lam,
+                float(omega_max_for_validity),
+                float(eft_kinematic_factor),
+            )
+            eft_valid_grid[iL, im] = bool(is_valid)
+            if not is_valid:
+                tau_grid[iL, im] = 0.0
+                continue
+
+            sigma_cm2 = sigma_tot_params_cm2(
+                float(E_target),
+                float(mchi),
+                1.0,
+                float(Lam),
+            )
+            if not np.isfinite(sigma_cm2) or float(sigma_cm2) <= 0.0:
+                tau_grid[iL, im] = 0.0
+                continue
+
+            A = float(rho_chi) * float(L_cm) / float(max(mchi, 1e-30))
+            tau_grid[iL, im] = float(A) * float(sigma_cm2)
+
+    return {
+        "Lambda_grid": Lambda_grid,
+        "mchi_grid": mchi_grid,
+        "tau_grid": tau_grid,
+        "eft_valid_grid": eft_valid_grid,
+    }
+
+
 def find_visible_params_fixed_lambda(
     *,
     Lambda,
@@ -134,7 +208,7 @@ def find_visible_params_fixed_lambda(
     n_samples,
     seed=0,
 ):
-    rng = np.random.default_rng(int(seed))
+    sampler = qmc.LatinHypercube(d=2, seed=int(seed))
 
     dip_depth = float(dip_depth)
     dip_depth = min(max(dip_depth, 0.0), 0.999999)
@@ -143,9 +217,11 @@ def find_visible_params_fixed_lambda(
     best_visible = None
     best_any = None
 
-    for _ in range(int(n_samples)):
-        log10_mchi = rng.uniform(float(log10_mchi_min), float(log10_mchi_max))
-        log10_cphi = rng.uniform(float(log10_cphi_min), float(log10_cphi_max))
+    u = sampler.random(n=int(n_samples))
+
+    for i in range(int(n_samples)):
+        log10_mchi = float(log10_mchi_min) + float(u[i, 0]) * (float(log10_mchi_max) - float(log10_mchi_min))
+        log10_cphi = float(log10_cphi_min) + float(u[i, 1]) * (float(log10_cphi_max) - float(log10_cphi_min))
 
         mchi = 10.0**log10_mchi
         cphi = 10.0**log10_cphi
@@ -315,6 +391,54 @@ def main():
         help="RNG seed for --find-visible.",
     )
     parser.add_argument(
+        "--tau-grid",
+        action="store_true",
+        help="If set, compute and plot tau_max(Lambda,mchi) grid at c_phi=1.",
+    )
+    parser.add_argument(
+        "--log10-Lambda-min",
+        type=float,
+        default=-1.0,
+        help="log10(Lambda/GeV) minimum for --tau-grid.",
+    )
+    parser.add_argument(
+        "--log10-Lambda-max",
+        type=float,
+        default=7.0,
+        help="log10(Lambda/GeV) maximum for --tau-grid.",
+    )
+    parser.add_argument(
+        "--tau-grid-n-lambda",
+        type=int,
+        default=40,
+        help="Number of Lambda grid points for --tau-grid.",
+    )
+    parser.add_argument(
+        "--tau-grid-n-mchi",
+        type=int,
+        default=40,
+        help="Number of mchi grid points for --tau-grid.",
+    )
+    parser.add_argument(
+        "--baseline",
+        type=str,
+        default=None,
+        choices=["gc", "cosmic", "custom"],
+        help="Baseline choice. If not provided, falls back to legacy --is-cosmic behavior.",
+    )
+    parser.add_argument(
+        "--rho-chi",
+        type=float,
+        default=None,
+        help="Custom baseline: rho_chi in GeV/cm^3 (used if --baseline custom).",
+    )
+    parser.add_argument(
+        "--L-cm",
+        type=float,
+        default=None,
+        help="Custom baseline: path length in cm (used if --baseline custom).",
+    )
+    parser.add_argument(
         "--log10-mchi-min",
         type=float,
         default=-12.0,
@@ -355,12 +479,23 @@ def main():
     C_PHI = float(args.c_phi)
     mchi = float(args.mchi)
 
-    if args.is_cosmic:
-        RHO_CHI_SETTING = rho_chi_cosmic
-        L_SETTING = L_cosmic
-    else:
+    baseline = args.baseline
+    if baseline is None:
+        baseline = "cosmic" if bool(args.is_cosmic) else "gc"
+
+    if baseline == "gc":
         RHO_CHI_SETTING = rho_chi_gc
         L_SETTING = L_gc
+    elif baseline == "cosmic":
+        RHO_CHI_SETTING = rho_chi_cosmic
+        L_SETTING = L_cosmic
+    elif baseline == "custom":
+        if args.rho_chi is None or args.L_cm is None:
+            raise ValueError("For --baseline custom you must provide both --rho-chi and --L-cm.")
+        RHO_CHI_SETTING = float(args.rho_chi)
+        L_SETTING = float(args.L_cm)
+    else:
+        raise ValueError(f"Unknown baseline={baseline!r}")
 
     print("==============================================")
     print(f"mχ fixed    = {mchi:.4e} GeV")
@@ -379,6 +514,106 @@ def main():
 
     # Reduced data for fitting
     E_plot, F_plot, F_err_plot = data_format(data, 50)
+
+    dip_depth = float(args.dip_depth)
+    dip_depth = min(max(dip_depth, 0.0), 0.999999)
+    tau_needed = -np.log(1.0 - dip_depth) if dip_depth > 0 else 0.0
+
+    if bool(args.tau_grid):
+        os.makedirs(args.outdir, exist_ok=True)
+
+        grid = compute_max_tau_grid(
+            E_target=float(args.dip_energy),
+            rho_chi=float(RHO_CHI_SETTING),
+            L_cm=float(L_SETTING),
+            omega_max_for_validity=float(np.max(E_data)),
+            eft_kinematic_factor=float(args.eft_kinematic_factor),
+            log10_Lambda_min=float(getattr(args, "log10_Lambda_min")),
+            log10_Lambda_max=float(getattr(args, "log10_Lambda_max")),
+            log10_mchi_min=float(args.log10_mchi_min),
+            log10_mchi_max=float(args.log10_mchi_max),
+            n_Lambda=int(getattr(args, "tau_grid_n_lambda")),
+            n_mchi=int(getattr(args, "tau_grid_n_mchi")),
+        )
+
+        Lambda_grid = np.asarray(grid["Lambda_grid"], dtype=float)
+        mchi_grid = np.asarray(grid["mchi_grid"], dtype=float)
+        tau_grid = np.asarray(grid["tau_grid"], dtype=float)
+        eft_valid_grid = np.asarray(grid["eft_valid_grid"], dtype=bool)
+
+        best_mchi_idx = np.argmax(tau_grid, axis=1)
+        tau_max_lambda = tau_grid[np.arange(tau_grid.shape[0]), best_mchi_idx]
+        eft_valid_at_best = eft_valid_grid[np.arange(eft_valid_grid.shape[0]), best_mchi_idx]
+
+        figL, axL = plt.subplots(figsize=(6.0, 4.0))
+        axL.plot(Lambda_grid, np.asarray(tau_max_lambda, dtype=float), lw=2)
+        axL.axhline(float(tau_needed), color="w", ls="--", lw=1)
+
+        invalid = ~np.asarray(eft_valid_at_best, dtype=bool)
+        if np.any(invalid):
+            invalid_idx = np.where(invalid)[0]
+            blocks = np.split(invalid_idx, np.where(np.diff(invalid_idx) != 1)[0] + 1)
+            for b in blocks:
+                x0 = float(Lambda_grid[int(b[0])])
+                x1 = float(Lambda_grid[int(b[-1])])
+                axL.axvspan(x0, x1, color="gray", alpha=0.2)
+
+        axL.set_xscale("log")
+        axL.set_yscale("log")
+        axL.set_xlabel(r"$\Lambda\,\,[\mathrm{GeV}]$")
+        axL.set_ylabel(r"$\tau_{\max}(E_{\rm target})$")
+        out_tau = os.path.join(args.outdir, f"tau_vs_lambda_rayleigh_scalar_{baseline}.png")
+        figL.tight_layout()
+        plt.savefig(out_tau)
+        plt.close(figL)
+
+        tau_plot = np.where(tau_grid > 0.0, tau_grid, np.nan)
+        log10_tau = np.log10(tau_plot)
+
+        figG, axG = plt.subplots(figsize=(6.5, 5.5))
+        extent = [
+            float(np.log10(Lambda_grid[0])),
+            float(np.log10(Lambda_grid[-1])),
+            float(np.log10(mchi_grid[0])),
+            float(np.log10(mchi_grid[-1])),
+        ]
+        im = axG.imshow(
+            log10_tau.T,
+            origin="lower",
+            aspect="auto",
+            extent=extent,
+            interpolation="nearest",
+        )
+        cbar = figG.colorbar(im, ax=axG)
+        cbar.set_label(r"$\log_{10}(\tau_{\max})$")
+
+        if float(tau_needed) > 0.0:
+            axG.contour(
+                np.log10(Lambda_grid),
+                np.log10(mchi_grid),
+                log10_tau.T,
+                levels=[float(np.log10(tau_needed))],
+                colors="w",
+                linewidths=1.5,
+            )
+
+        axG.contour(
+            np.log10(Lambda_grid),
+            np.log10(mchi_grid),
+            eft_valid_grid.T.astype(float),
+            levels=[0.5],
+            colors="k",
+            linewidths=1.5,
+        )
+
+        axG.set_xlabel(r"$\log_{10}(\Lambda/\mathrm{GeV})$")
+        axG.set_ylabel(r"$\log_{10}(m_\chi/\mathrm{GeV})$")
+        out_grid = os.path.join(args.outdir, f"tau_grid_rayleigh_scalar_{baseline}.png")
+        figG.tight_layout()
+        plt.savefig(out_grid)
+        plt.close(figG)
+
+        return
 
     # -------- Smooth Flux Model (No Scattering) --------
     # Initial guess
