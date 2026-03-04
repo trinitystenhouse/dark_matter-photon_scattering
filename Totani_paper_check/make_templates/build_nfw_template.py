@@ -209,6 +209,32 @@ def main():
     ap.add_argument("--roi-lon", type=float, default=60.0)
     ap.add_argument("--roi-lat", type=float, default=60.0)
 
+    ap.add_argument(
+        "--iso-target-e2",
+        type=float,
+        default=1e-4,
+        help="Reference E^2 dN/dE [MeV cm^-2 s^-1 sr^-1] used to set f=1 normalization.",
+    )
+    ap.add_argument(
+        "--rescale-to-data-sum",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="After building mu, rescale each energy plane so sum(mu)=sum(data) within the ROI/data mask.",
+    )
+    ap.add_argument(
+        "--report-bin",
+        type=int,
+        default=None,
+        help="If set, print per-bin diagnostics for this energy bin index.",
+    )
+
+    ap.add_argument(
+        "--pole-lat",
+        type=float,
+        default=90.0,
+        help="Latitude (deg) used for NFW normalization band: use |b|>=pole_lat (with a binsz margin).",
+    )
+
     # NFW / LOS parameters
     ap.add_argument("--rho-power", type=float, default=2.5, help="p in ∫rho^p ds (e.g. 1,2,2.5)")
     ap.add_argument("--gamma", type=float, default=1.0, help="inner slope gamma for gNFW (gamma=1 is NFW)")
@@ -341,23 +367,40 @@ def main():
                 f"rhos={args.rhos}, rs_kpc={args.rs_kpc}, R0_kpc={args.R0_kpc}, rvir_kpc={args.rvir_kpc}, gamma={args.gamma})."
             )
 
-    # Optional: pole normalisation (interpretability)
+    # Optional: pole-like normalisation using a latitude band on the actual pixel grid.
+    # This keeps the template spatial-only while allowing a configurable "pole" latitude.
     if args.norm in ("pole", "pole+roi-sum", "ref-point"):
-        Jpole = pole_normalization_value(
-            rho_power=args.rho_power,
-            gamma=args.gamma,
-            rs_kpc=args.rs_kpc,
-            rhos=args.rhos,
-            R0_kpc=args.R0_kpc,
-            rvir_kpc=args.rvir_kpc,
-            n_s=max(4096, args.n_s),
-            smax_kpc=args.smax_kpc,
-        )
-        if not np.isfinite(Jpole) or Jpole <= 0:
-            raise RuntimeError("Pole normalization integral is non-positive.")
+        pole_lat = float(args.pole_lat)
+        pole_lat_eff = max(0.0, min(90.0, pole_lat - float(args.binsz)))
+        pole2d = data_ok2d & (np.abs(lat) >= pole_lat_eff)
+        pole_vals = J[pole2d]
+        pole_vals = pole_vals[np.isfinite(pole_vals) & (pole_vals > 0)]
+        if pole_vals.size == 0:
+            # If data coverage does not extend to the requested pole band (common if |b|max < pole_lat),
+            # fall back to the *analytic* Jpole at b=+90 deg. This preserves Totani's pole convention.
+            vabs = np.abs(lat[data_ok2d])
+            max_cov = float(np.nanmax(vabs)) if np.any(np.isfinite(vabs)) else np.nan
+            print(
+                f"WARNING: pole normalization band empty for |b|>={pole_lat_eff:.2f} deg (max coverage |b|~{max_cov:.2f} deg). "
+                "Falling back to analytic Jpole at b=90 deg."
+            )
+            Jpole = pole_normalization_value(
+                rho_power=args.rho_power,
+                gamma=args.gamma,
+                rs_kpc=args.rs_kpc,
+                rhos=args.rhos,
+                R0_kpc=args.R0_kpc,
+                rvir_kpc=args.rvir_kpc,
+                n_s=max(4096, args.n_s),
+                smax_kpc=args.smax_kpc,
+            )
+        else:
+            Jpole = float(np.mean(pole_vals))
+        if (not np.isfinite(Jpole)) or (Jpole <= 0.0):
+            raise RuntimeError("Pole normalization factor is non-positive or non-finite.")
 
     if args.norm == "pole":
-        J = J / Jpole
+        J = J / float(Jpole)
         norm_fact_total *= float(Jpole)
     elif args.norm == "ref-point":
         ref_lon = float(args.ref_lon) % 360.0
@@ -390,7 +433,7 @@ def main():
         J = J / denom
         norm_fact_total *= denom
     elif args.norm == "pole+roi-sum":
-        J = J / Jpole
+        J = J / float(Jpole)
         norm_fact_total *= float(Jpole)
         vals = J[roi]
         vals = vals[np.isfinite(vals) & (vals > 0)]
@@ -402,13 +445,19 @@ def main():
         J = J / denom
         norm_fact_total *= denom
 
+    # Now apply ROI mask and normalize to mean=1 within ROI for fitter stability.
+    J[~roi] = 0.0
 
     # For fitting stability: normalise spatial template to mean=1 within ROI
-    # vals = J[roi]
-    # vals = vals[np.isfinite(vals) & (vals > 0)]
-    # if vals.size == 0:
-    #     raise RuntimeError("NFW template is zero in ROI after masking.")
-    # J = J / np.mean(vals)
+    vals = J[roi]
+    vals = vals[np.isfinite(vals) & (vals > 0)]
+    if vals.size == 0:
+        raise RuntimeError("NFW template is zero in ROI after masking.")
+    mroi = float(np.mean(vals))
+    if (not np.isfinite(mroi)) or (mroi == 0.0):
+        raise RuntimeError("NFW ROI mean is invalid; cannot normalize.")
+    J = J / mroi
+    norm_fact_total *= float(mroi)
 
     nfw_spatial = J.astype(np.float64)
 
@@ -419,16 +468,63 @@ def main():
     print("mean J in pole cap:", np.mean(J[pole_cap]))
 
 
-    # --- COUNTS TEMPLATE (this is what your mu_list expects) ---
-    # denom here is the factor that converts flux -> counts
-    conv = expo * omega[None, :, :] * dE_mev[:, None, None]   # shape (nE,ny,nx)
-    # Template is shape-only; fitted coefficient will be in units of flux [ph cm^-2 s^-1 sr^-1 MeV^-1]
-    mu_nfw = nfw_spatial[None, :, :] * conv                 # shape (nE,ny,nx)
+    def _template_scale_report(*, k: int, data2d: np.ndarray, mu2d: np.ndarray, mask2d: np.ndarray, label: str):
+        m = np.asarray(mask2d, bool)
+        y = float(np.nansum(np.asarray(data2d, float)[m]))
+        s = float(np.nansum(np.asarray(mu2d, float)[m]))
+        med = float(np.nanmedian(np.asarray(mu2d, float)[m])) if int(np.count_nonzero(m)) else np.nan
+        mx = float(np.nanmax(np.asarray(mu2d, float)[m])) if int(np.count_nonzero(m)) else np.nan
+        print(
+            f"bin k={k}: {label:8s}  data_sum={y:.3e}  mu_sum={s:.3e}  ratio={s / y if y > 0 else np.nan:.3e}  "
+            f"median={med:.3e}  max={mx:.3e}"
+        )
 
-    nfw_dnde = np.full_like(mu_nfw, np.nan, dtype=np.float64)
+    # --- Build intensity + counts templates ---
+    # conv converts intensity [ph cm^-2 s^-1 sr^-1 MeV^-1] -> counts
+    conv = expo * omega[None, :, :] * dE_mev[:, None, None]  # (nE,ny,nx)
+    if conv.shape != (nE, ny, nx):
+        raise RuntimeError(f"conv shape {conv.shape} != {(nE, ny, nx)}")
+    if conv.ndim != 3:
+        raise RuntimeError(f"conv must be 3D (nE,ny,nx); got ndim={conv.ndim}")
+    if np.ndim(omega) != 2:
+        raise RuntimeError(f"omega must be 2D (ny,nx); got shape={np.shape(omega)}")
+
+    iso_target_E2 = float(args.iso_target_e2)
+    Iref_mev = iso_target_E2 / (np.asarray(Ectr_mev, float) ** 2)  # (nE,) dN/dE
+
+    nfw_dnde = Iref_mev[:, None, None] * nfw_spatial[None, :, :]
+    nfw_E2dnde = nfw_dnde * (np.asarray(Ectr_mev, float)[:, None, None] ** 2)
+    mu_nfw = nfw_dnde * conv
+
+    if mu_nfw.shape != (nE, ny, nx):
+        raise RuntimeError(f"mu_nfw shape {mu_nfw.shape} != {(nE, ny, nx)}")
     ok = np.isfinite(conv) & (conv > 0)
-    nfw_dnde[ok] = mu_nfw[ok] / conv[ok]        # equals nfw_spatial broadcast, by construction
-    nfw_E2dnde = nfw_dnde * (Ectr_mev[:, None, None] ** 2)
+    if not np.all(np.isfinite(mu_nfw[ok])):
+        raise RuntimeError("mu_nfw has non-finite values on pixels with conv>0")
+
+    # Force outside ROI/data mask to zero (consistent footprint)
+    mu_nfw[:, ~roi] = 0.0
+    nfw_dnde[:, ~roi] = 0.0
+    nfw_E2dnde[:, ~roi] = 0.0
+
+    # Optional: per-bin rescale to match data sum in the same ROI mask
+    scales = np.ones(nE, dtype=float)
+    if bool(args.rescale_to_data_sum):
+        for k in range(nE):
+            y = float(np.nansum(counts_cube[k][roi]))
+            s = float(np.nansum(mu_nfw[k][roi]))
+            if (not np.isfinite(y)) or (y <= 0) or (not np.isfinite(s)) or (s <= 0):
+                continue
+            scales[k] = y / s
+            mu_nfw[k] *= scales[k]
+            nfw_dnde[k] *= scales[k]
+            nfw_E2dnde[k] *= scales[k]
+
+    if args.report_bin is not None:
+        k = int(args.report_bin)
+        if k < 0 or k >= nE:
+            raise ValueError(f"report-bin {k} out of range [0,{nE-1}]")
+        _template_scale_report(k=k, data2d=counts_cube[k], mu2d=mu_nfw[k], mask2d=roi, label="nfw")
 
 
     # -------------------------
@@ -438,12 +534,16 @@ def main():
     hdr_out = hdr.copy()
     hdr_out["NORMFACT"] = (float(norm_fact_total), "Factor divided out of raw J to form output")
     hdr_out["NORMMODE"] = (str(norm_mode), "Normalization mode used for spatial template")
+    hdr_out["ISOE2"] = (float(iso_target_E2), "Reference E^2 dN/dE for f=1 [MeV cm-2 s-1 sr-1]")
+    hdr_out["RESCLSUM"] = (bool(args.rescale_to_data_sum), "Rescaled each bin to match data sum in ROI")
     if refpole is not None:
         hdr_out["REFPOLE"] = (float(refpole), "J_ref / J_pole (preserves conversion to pole)")
 
     write_cube(out_dnde, nfw_dnde, hdr_out, bunit="ph cm-2 s-1 sr-1 MeV-1")
     write_cube(out_e2dnde, nfw_E2dnde, hdr_out, bunit="MeV cm-2 s-1 sr-1")
     write_cube(out_mu, mu_nfw, hdr_out, bunit="counts")
+
+    np.savez(os.path.join(outdir, f"nfw{suffix}_rescale_factors.npz"), scales=scales)
 
     print("✓ wrote", out_dnde)
     print("✓ wrote", out_e2dnde)

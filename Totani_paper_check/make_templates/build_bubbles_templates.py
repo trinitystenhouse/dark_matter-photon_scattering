@@ -207,6 +207,25 @@ def main():
     ap.add_argument("--disk-cut-deg", type=float, default=10.0)
     ap.add_argument("--binsz", type=float, default=0.125)
 
+    ap.add_argument(
+        "--iso-target-e2",
+        type=float,
+        default=1e-4,
+        help="Reference E^2 dN/dE [MeV cm^-2 s^-1 sr^-1] used to set f=1 normalization.",
+    )
+    ap.add_argument(
+        "--rescale-to-data-sum",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="After building mu, rescale each energy plane so sum(mu)=sum(data) within ROI/srcmask/data coverage.",
+    )
+    ap.add_argument(
+        "--report-bin",
+        type=int,
+        default=None,
+        help="If set, print per-bin diagnostics for this energy bin index.",
+    )
+
     here = os.path.dirname(__file__)
     ap.add_argument("--verts-north", default=os.path.join(here, "bubble_vertices_north.txt"))
     ap.add_argument("--verts-south", default=os.path.join(here, "bubble_vertices_south.txt"))
@@ -274,6 +293,10 @@ def main():
     src_keep_3d = load_mask_any_shape(args.srcmask, counts.shape) if args.srcmask else np.ones_like(counts, bool)
     src_keep_2d = np.all(np.asarray(src_keep_3d, bool), axis=0)
 
+    data_ok3d = np.isfinite(counts) & np.isfinite(expo) & (expo > 0)
+    data_ok2d = np.any(data_ok3d, axis=0)
+    fit2d = roi2d & src_keep_2d & data_ok2d
+
     # Load base background templates in counts-space
     labels = list(args.components)
     mu_list, _hdrs = load_mu_templates_from_fits(
@@ -320,6 +343,8 @@ def main():
         expo=expo,
         omega=omega,
         dE_mev=dE_mev,
+        Ectr_mev=Ectr_mev,
+        iso_target_E2=float(args.iso_target_e2),
         templates_counts=templates_counts,
         base_component_order=labels,
         roi2d=roi2d,
@@ -355,18 +380,96 @@ def main():
     print("[out]", flat_out)
 
 
-    mu_pos = build_flat_counts_template(mask2d=pos_mask, expo=expo, omega=omega, dE_mev=dE_mev)
-    mu_neg = build_flat_counts_template(mask2d=neg_mask, expo=expo, omega=omega, dE_mev=dE_mev)
-    mu_flat = build_flat_counts_template(mask2d=flat_mask, expo=expo, omega=omega, dE_mev=dE_mev)
+    iso_target_E2 = float(args.iso_target_e2)
 
-    fits.PrimaryHDU(mu_pos.astype(np.float32), header=hdr).writeto(
+    mu_pos = build_flat_counts_template(
+        mask2d=pos_mask,
+        roi2d=roi2d,
+        expo=expo,
+        omega=omega,
+        dE_mev=dE_mev,
+        Ectr_mev=Ectr_mev,
+        iso_target_E2=iso_target_E2,
+    )
+    mu_neg = build_flat_counts_template(
+        mask2d=neg_mask,
+        roi2d=roi2d,
+        expo=expo,
+        omega=omega,
+        dE_mev=dE_mev,
+        Ectr_mev=Ectr_mev,
+        iso_target_E2=iso_target_E2,
+    )
+    mu_flat = build_flat_counts_template(
+        mask2d=flat_mask,
+        roi2d=roi2d,
+        expo=expo,
+        omega=omega,
+        dE_mev=dE_mev,
+        Ectr_mev=Ectr_mev,
+        iso_target_E2=iso_target_E2,
+    )
+
+    def _template_scale_report(*, k: int, data2d: np.ndarray, mu2d: np.ndarray, mask2d: np.ndarray, label: str):
+        m = np.asarray(mask2d, bool)
+        y = float(np.nansum(np.asarray(data2d, float)[m]))
+        s = float(np.nansum(np.asarray(mu2d, float)[m]))
+        med = float(np.nanmedian(np.asarray(mu2d, float)[m])) if int(np.count_nonzero(m)) else np.nan
+        mx = float(np.nanmax(np.asarray(mu2d, float)[m])) if int(np.count_nonzero(m)) else np.nan
+        print(
+            f"bin k={k}: {label:8s}  data_sum={y:.3e}  mu_sum={s:.3e}  ratio={s / y if y > 0 else np.nan:.3e}  "
+            f"median={med:.3e}  max={mx:.3e}"
+        )
+
+    scales_pos = np.ones(nE, dtype=float)
+    scales_neg = np.ones(nE, dtype=float)
+    scales_flat = np.ones(nE, dtype=float)
+    if bool(args.rescale_to_data_sum):
+        for k in range(nE):
+            y = float(np.nansum(counts[k][fit2d]))
+
+            sp = float(np.nansum(mu_pos[k][fit2d]))
+            if np.isfinite(y) and (y > 0) and np.isfinite(sp) and (sp > 0):
+                scales_pos[k] = y / sp
+                mu_pos[k] *= scales_pos[k]
+
+            sn = float(np.nansum(mu_neg[k][fit2d]))
+            if np.isfinite(y) and (y > 0) and np.isfinite(sn) and (sn > 0):
+                scales_neg[k] = y / sn
+                mu_neg[k] *= scales_neg[k]
+
+            sf = float(np.nansum(mu_flat[k][fit2d]))
+            if np.isfinite(y) and (y > 0) and np.isfinite(sf) and (sf > 0):
+                scales_flat[k] = y / sf
+                mu_flat[k] *= scales_flat[k]
+
+    if args.report_bin is not None:
+        k = int(args.report_bin)
+        if k < 0 or k >= nE:
+            raise ValueError(f"report-bin {k} out of range [0,{nE-1}]")
+        _template_scale_report(k=k, data2d=counts[k], mu2d=mu_pos[k], mask2d=fit2d, label="fb_pos")
+        _template_scale_report(k=k, data2d=counts[k], mu2d=mu_neg[k], mask2d=fit2d, label="fb_neg")
+        _template_scale_report(k=k, data2d=counts[k], mu2d=mu_flat[k], mask2d=fit2d, label="fb_flat")
+
+    hdr_out = hdr.copy()
+    hdr_out["ISOE2"] = (float(iso_target_E2), "Reference E^2 dN/dE for f=1 [MeV cm-2 s-1 sr-1]")
+    hdr_out["RESCLSUM"] = (bool(args.rescale_to_data_sum), "Rescaled each bin to match data sum in fit mask")
+
+    fits.PrimaryHDU(mu_pos.astype(np.float32), header=hdr_out).writeto(
         os.path.join(args.out_dir, "mu_fb_pos_counts.fits"), overwrite=True
     )
-    fits.PrimaryHDU(mu_neg.astype(np.float32), header=hdr).writeto(
+    fits.PrimaryHDU(mu_neg.astype(np.float32), header=hdr_out).writeto(
         os.path.join(args.out_dir, "mu_fb_neg_counts.fits"), overwrite=True
     )
-    fits.PrimaryHDU(mu_flat.astype(np.float32), header=hdr).writeto(
+    fits.PrimaryHDU(mu_flat.astype(np.float32), header=hdr_out).writeto(
         os.path.join(args.out_dir, "mu_fb_flat_counts.fits"), overwrite=True
+    )
+
+    np.savez(
+        os.path.join(args.out_dir, "fb_flat_rescale_factors.npz"),
+        scales_pos=scales_pos,
+        scales_neg=scales_neg,
+        scales_flat=scales_flat,
     )
 
     # Diagnostics

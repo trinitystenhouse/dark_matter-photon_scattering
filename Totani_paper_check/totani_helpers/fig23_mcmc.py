@@ -88,8 +88,9 @@ def _plot_multi(Ectr_mev, curves, *, out_png=None, title=None, plot_style: str =
         plot_E2_dnde_multi_diagnostic(Ectr_mev, curves, out_png=out_png, title=title)
 
 
-def make_fig2_fig3_plots_from_mcmc(
+def make_plots_from_mcmc(
     *,
+    fig: str,
     counts_path: str,
     expo_path: str,
     templates_dir: str,
@@ -173,7 +174,7 @@ def make_fig2_fig3_plots_from_mcmc(
     # x-axis is energy-bin index, since Ectr values live in counts FITS.
     xk = np.arange(nE, dtype=int)
     save_coeff_table_txt(
-        out_txt=os.path.join(outdir, f"fit_coefficients_mcmc_{mcmc_stat}.txt"),
+        out_txt=os.path.join(outdir, f"fit_coefficients_mcmc_{fig}_{mcmc_stat}.txt"),
         x=xk,
         coeffs_by_label=coeffs_plot,
         keys=keys_for_coeff_dump,
@@ -199,43 +200,14 @@ def make_fig2_fig3_plots_from_mcmc(
         bkg_names = list(templates_counts.keys())
 
     # Fig2 (include disk)
-    curves2 = []
-    for name in bkg_names:
-        E2 = E2_from_pred_counts_maps(
-            pred_counts_map=np.asarray(comp_counts_dict[name], float),
-            expo=expo,
-            omega=omega,
-            dE_mev=dE_mev,
-            Ectr_mev=Ectr_mev,
-            mask2d=fit_mask_2d,
-        )
-        curves2.append((name, E2))
-    E2_tot2 = E2_from_pred_counts_maps(
-        pred_counts_map=np.asarray(model_counts_total, float),
-        expo=expo,
-        omega=omega,
-        dE_mev=dE_mev,
-        Ectr_mev=Ectr_mev,
-        mask2d=fit_mask_2d,
-    )
-    curves2.append(("total", E2_tot2))
-
-    _save_curves_txt(
-        out_txt=os.path.join(outdir, f"E2_dnde_background_components_mcmc_fig2_{mcmc_stat}.txt"),
-        Ectr_mev=Ectr_mev,
-        curves=curves2,
-    )
-    _plot_multi(
-        Ectr_mev,
-        curves2,
-        out_png=os.path.join(outdir, "E2_dnde_background_components_mcmc_fig2.png"),
-        title=f"MCMC background components ({mcmc_stat})",
-        plot_style=plot_style,
-    )
-
     # Fig3 (exclude disk in plot)
-    plot_mask2d = fit_mask_2d & (np.abs(lat) >= float(disk_cut))
-    curves3 = []
+    # All others : fitted w/o disk
+    if fig == "fig3":
+        plot_mask2d = fit_mask_2d & (np.abs(lat) >= float(disk_cut))
+    else:
+        plot_mask2d = fit_mask_2d
+
+    curves = []
     for name in bkg_names:
         E2 = E2_from_pred_counts_maps(
             pred_counts_map=np.asarray(comp_counts_dict[name], float),
@@ -245,8 +217,8 @@ def make_fig2_fig3_plots_from_mcmc(
             Ectr_mev=Ectr_mev,
             mask2d=plot_mask2d,
         )
-        curves3.append((name, E2))
-    E2_tot3 = E2_from_pred_counts_maps(
+        curves.append((name, E2))
+    E2_tot = E2_from_pred_counts_maps(
         pred_counts_map=np.asarray(model_counts_total, float),
         expo=expo,
         omega=omega,
@@ -254,18 +226,24 @@ def make_fig2_fig3_plots_from_mcmc(
         Ectr_mev=Ectr_mev,
         mask2d=plot_mask2d,
     )
-    curves3.append(("total", E2_tot3))
+    curves.append(("total", E2_tot))
 
     _save_curves_txt(
-        out_txt=os.path.join(outdir, f"E2_dnde_background_components_mcmc_fig3_{mcmc_stat}.txt"),
+        out_txt=os.path.join(outdir, f"E2_dnde_background_components_mcmc_{fig}_{mcmc_stat}.txt"),
         Ectr_mev=Ectr_mev,
-        curves=curves3,
+        curves=curves,
     )
+
+    if fig == "fig3":
+        title = f"MCMC background components ({mcmc_stat}), |b|>={float(disk_cut):g} deg"
+    else:
+        title = f"MCMC background components ({mcmc_stat})"
+
     _plot_multi(
         Ectr_mev,
-        curves3,
-        out_png=os.path.join(outdir, "E2_dnde_background_components_mcmc_fig3.png"),
-        title=f"MCMC background components ({mcmc_stat}), |b|>={float(disk_cut):g} deg",
+        curves,
+        out_png=os.path.join(outdir, f"E2_dnde_background_components_mcmc_{fig}_{mcmc_stat}.png"),
+        title=title,
         plot_style=plot_style,
     )
 
@@ -273,7 +251,6 @@ def make_fig2_fig3_plots_from_mcmc(
         "Ectr_mev": Ectr_mev,
         "dE_mev": dE_mev,
         "bkg_names": bkg_names,
-        "curves2": curves2,
-        "curves3": curves3,
+        "curves": curves,
         "coeffs_by_label": coeffs_plot,
     }

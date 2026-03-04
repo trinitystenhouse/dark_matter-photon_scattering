@@ -35,11 +35,6 @@ def main():
         default="f_ml",
         help="Which MCMC summary coefficient to use per bin.",
     )
-    p.add_argument(
-        "--out-txt",
-        default=os.path.join(os.path.dirname(__file__), "mcmc_coefficients.txt"),
-        help="Output txt path.",
-    )
 
     p.add_argument(
         "--make-plots",
@@ -112,14 +107,30 @@ def main():
         keys = [str(k) for k in args.keys]
 
     x = np.arange(int(np.nanmax(tab.bins_present)) + 1, dtype=int)
-    save_coeff_table_txt(out_txt=args.out_txt, x=x, coeffs_by_label=coeffs, keys=keys, x_label="k")
-    print(f"✓ Wrote {args.out_txt}")
+    save_coeff_table_txt(out_txt="mcmc", x=x, coeffs_by_label=coeffs, keys=keys, x_label="k")
+    print(f"✓ Wrote mcmc.txt")
 
     if args.make_plots:
         # Lazy import: only import plotting helpers when actually making plots
-        from totani_helpers.fig23_mcmc import make_fig2_fig3_plots_from_mcmc
+        from totani_helpers.fig23_mcmc import make_plots_from_mcmc
         
-        make_fig2_fig3_plots_from_mcmc(
+        make_plots_from_mcmc(
+            fig="fig2",
+            counts_path=args.counts,
+            expo_path=args.expo,
+            templates_dir=args.templates_dir,
+            mcmc_dir=args.mcmc_dir,
+            outdir=args.outdir,
+            mcmc_stat=args.mcmc_stat,
+            plot_style=args.plot_style,
+            ext_mask_path=args.ext_mask,
+            roi_lon=float(args.roi_lon),
+            roi_lat=float(args.roi_lat),
+            disk_cut=float(args.disk_cut),
+            binsz=float(args.binsz),
+        )
+        make_plots_from_mcmc(
+            fig="fig3",
             counts_path=args.counts,
             expo_path=args.expo,
             templates_dir=args.templates_dir,

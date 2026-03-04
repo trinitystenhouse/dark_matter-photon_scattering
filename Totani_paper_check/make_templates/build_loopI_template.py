@@ -98,6 +98,25 @@ def main():
     ap.add_argument("--roi-lon", type=float, default=60.0)
     ap.add_argument("--roi-lat", type=float, default=60.0)
 
+    ap.add_argument(
+        "--iso-target-e2",
+        type=float,
+        default=1e-4,
+        help="Reference E^2 dN/dE [MeV cm^-2 s^-1 sr^-1] used to set f=1 normalization.",
+    )
+    ap.add_argument(
+        "--rescale-to-data-sum",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="After building mu, rescale each energy plane so sum(mu)=sum(data) within ROI/data mask.",
+    )
+    ap.add_argument(
+        "--report-bin",
+        type=int,
+        default=None,
+        help="If set, print per-bin diagnostics for this energy bin index.",
+    )
+
     ap.add_argument("--shell1-l", type=float, default=341.0)
     ap.add_argument("--shell1-b", type=float, default=3.0)
     ap.add_argument("--shell1-dist-pc", type=float, default=78.0)
@@ -114,7 +133,7 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
 
     # --- Load counts grid + energies ---
-    _counts, hdr, Emin_mev, Emax_mev, Ectr_mev, dE_mev = read_counts_and_ebounds(args.counts)
+    counts_cube, hdr, Emin_mev, Emax_mev, Ectr_mev, dE_mev = read_counts_and_ebounds(args.counts)
     nE = int(Ectr_mev.size)
     wcs = WCS(hdr).celestial
     ny, nx = int(hdr["NAXIS2"]), int(hdr["NAXIS1"])
@@ -134,7 +153,9 @@ def main():
     # --- ROI mask ---
     roi2d = (np.abs(lon) <= args.roi_lon) & (np.abs(lat) <= args.roi_lat)
 
-    fit2d = roi2d
+    data_ok3d = np.isfinite(counts_cube) & np.isfinite(expo) & (expo > 0)
+    data_ok2d = np.any(data_ok3d, axis=0)
+    fit2d = roi2d & data_ok2d
 
     print("[units debug] omega median:", np.nanmedian(omega[roi2d]))
     print("[units debug] dE_mev min/median/max:", np.min(dE_mev), np.median(dE_mev), np.max(dE_mev))
@@ -171,6 +192,12 @@ def main():
     s = float(np.nansum(T))
     if not np.isfinite(s) or s <= 0:
         raise RuntimeError("Loop I template is zero in ROI; check shell parameters")
+
+    vals = T[fit2d]
+    vals = vals[np.isfinite(vals) & (vals > 0)]
+    if vals.size == 0:
+        raise RuntimeError("Loop I template has no positive pixels in fit mask")
+    T = T / np.mean(vals)
 
     # --- Physical Loop I gamma-ray emission model ---
     # Loop I is a radio shell with known surface brightness
@@ -223,13 +250,37 @@ def main():
                 f" mean={np.nanmean(fit_vals_norm):.6g} sum={np.nansum(fit_vals_norm):.6g}"
             )
 
-    # --- PHENO (Totani-style): energy-independent morphology replicated ---
-    loopI_dnde = np.broadcast_to(T_norm[None, :, :], (nE, ny, nx)).astype(float).copy()
+    def _template_scale_report(*, k: int, data2d: np.ndarray, mu2d: np.ndarray, mask2d: np.ndarray, label: str):
+        m = np.asarray(mask2d, bool)
+        y = float(np.nansum(np.asarray(data2d, float)[m]))
+        s = float(np.nansum(np.asarray(mu2d, float)[m]))
+        med = float(np.nanmedian(np.asarray(mu2d, float)[m])) if int(np.count_nonzero(m)) else np.nan
+        mx = float(np.nanmax(np.asarray(mu2d, float)[m])) if int(np.count_nonzero(m)) else np.nan
+        print(
+            f"bin k={k}: {label:8s}  data_sum={y:.3e}  mu_sum={s:.3e}  ratio={s / y if y > 0 else np.nan:.3e}  "
+            f"median={med:.3e}  max={mx:.3e}"
+        )
 
-    # Convert shape -> counts template
-    # Template is shape-only (already normalized to mean=1 in ROI)
-    # Fitted coefficient will be in units of flux [ph cm^-2 s^-1 sr^-1 MeV^-1]
-    mu_loopI = loopI_dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
+    # --- PHENO (Totani-style): energy-independent morphology replicated ---
+    Tcube = np.broadcast_to(T_norm[None, :, :], (nE, ny, nx)).astype(float).copy()
+
+    iso_target_E2 = float(args.iso_target_e2)
+    Iref_mev = iso_target_E2 / (np.asarray(Ectr_mev, float) ** 2)
+
+    loopI_dnde = Iref_mev[:, None, None] * Tcube
+    loopI_E2dnde = loopI_dnde * (np.asarray(Ectr_mev, float)[:, None, None] ** 2)
+    conv = expo * omega[None, :, :] * dE_mev[:, None, None]
+    if conv.shape != (nE, ny, nx) or conv.ndim != 3:
+        raise RuntimeError(f"conv must be 3D (nE,ny,nx); got shape={conv.shape}")
+    mu_loopI = loopI_dnde * conv
+
+    ok = np.isfinite(conv) & (conv > 0)
+    if not np.all(np.isfinite(mu_loopI[ok])):
+        raise RuntimeError("mu_loopI has non-finite values on pixels with conv>0")
+
+    mu_loopI[:, ~fit2d] = 0.0
+    loopI_dnde[:, ~fit2d] = 0.0
+    loopI_E2dnde[:, ~fit2d] = 0.0
 
     # --- Also write separate Loop A / Loop B templates (shell1 / shell2) ---
     def _norm_and_mu(T_in):
@@ -242,10 +293,16 @@ def main():
         if vals_in.size == 0:
             raise RuntimeError("Loop I sub-template has no positive pixels in fit mask")
 
-        Tn = T_in
-        dnde = np.broadcast_to(Tn[None, :, :], (nE, ny, nx)).astype(float).copy()
-        mu = dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
-        e2 = dnde * (Ectr_mev[:, None, None] ** 2)
+        Tn = T_in / np.mean(vals_in)
+        Tn_cube = np.broadcast_to(Tn[None, :, :], (nE, ny, nx)).astype(float).copy()
+        dnde = Iref_mev[:, None, None] * Tn_cube
+        e2 = dnde * (np.asarray(Ectr_mev, float)[:, None, None] ** 2)
+        mu = dnde * conv
+        if mu.shape != (nE, ny, nx):
+            raise RuntimeError(f"mu subtemplate shape {mu.shape} != {(nE, ny, nx)}")
+        mu[:, ~fit2d] = 0.0
+        dnde[:, ~fit2d] = 0.0
+        e2[:, ~fit2d] = 0.0
         return dnde, e2, mu
 
     loopA_dnde, loopA_E2dnde, mu_loopA = _norm_and_mu(shell1)
@@ -265,8 +322,42 @@ def main():
                 f" mean={np.nanmean(mu_vals):.6g} sum={np.nansum(mu_vals):.6g}"
             )
 
-    # Optional diagnostic products (shape only)
-    loopI_E2dnde = loopI_dnde * (Ectr_mev[:, None, None] ** 2)
+    # Optional: per-bin rescale to match data sum in the same fit mask
+    scales_I = np.ones(nE, dtype=float)
+    scales_A = np.ones(nE, dtype=float)
+    scales_B = np.ones(nE, dtype=float)
+    if bool(args.rescale_to_data_sum):
+        for k in range(nE):
+            y = float(np.nansum(counts_cube[k][fit2d]))
+
+            sI = float(np.nansum(mu_loopI[k][fit2d]))
+            if np.isfinite(y) and (y > 0) and np.isfinite(sI) and (sI > 0):
+                scales_I[k] = y / sI
+                mu_loopI[k] *= scales_I[k]
+                loopI_dnde[k] *= scales_I[k]
+                loopI_E2dnde[k] *= scales_I[k]
+
+            sA = float(np.nansum(mu_loopA[k][fit2d]))
+            if np.isfinite(y) and (y > 0) and np.isfinite(sA) and (sA > 0):
+                scales_A[k] = y / sA
+                mu_loopA[k] *= scales_A[k]
+                loopA_dnde[k] *= scales_A[k]
+                loopA_E2dnde[k] *= scales_A[k]
+
+            sB = float(np.nansum(mu_loopB[k][fit2d]))
+            if np.isfinite(y) and (y > 0) and np.isfinite(sB) and (sB > 0):
+                scales_B[k] = y / sB
+                mu_loopB[k] *= scales_B[k]
+                loopB_dnde[k] *= scales_B[k]
+                loopB_E2dnde[k] *= scales_B[k]
+
+    if args.report_bin is not None:
+        k = int(args.report_bin)
+        if k < 0 or k >= nE:
+            raise ValueError(f"report-bin {k} out of range [0,{nE-1}]")
+        _template_scale_report(k=k, data2d=counts_cube[k], mu2d=mu_loopA[k], mask2d=fit2d, label="loopA")
+        _template_scale_report(k=k, data2d=counts_cube[k], mu2d=mu_loopB[k], mask2d=fit2d, label="loopB")
+        _template_scale_report(k=k, data2d=counts_cube[k], mu2d=mu_loopI[k], mask2d=fit2d, label="loopI")
 
 
     # --- write ---
@@ -282,10 +373,14 @@ def main():
     out_e2_B = os.path.join(args.outdir, "loopB_E2dnde.fits")
     out_mu_B = os.path.join(args.outdir, "mu_loopB_counts.fits")
 
+    hdr_out = hdr.copy()
+    hdr_out["ISOE2"] = (float(iso_target_E2), "Reference E^2 dN/dE for f=1 [MeV cm-2 s-1 sr-1]")
+    hdr_out["RESCLSUM"] = (bool(args.rescale_to_data_sum), "Rescaled each bin to match data sum in fit mask")
+
     write_primary_with_bunit(
         out_dnde,
         loopI_dnde,
-        hdr,
+        hdr_out,
         "ph cm-2 s-1 sr-1 MeV-1",
         [
             "Loop I template: Physical IC emission model",
@@ -296,7 +391,7 @@ def main():
     write_primary_with_bunit(
         out_e2,
         loopI_E2dnde,
-        hdr,
+        hdr_out,
         "MeV cm-2 s-1 sr-1",
         [
             "Loop I geometric template: E^2 dN/dE",
@@ -305,7 +400,7 @@ def main():
     write_primary_with_bunit(
         out_mu,
         mu_loopI,
-        hdr,
+        hdr_out,
         "counts",
         [
             "Loop I geometric template: expected counts per bin per pixel",
@@ -315,7 +410,7 @@ def main():
     write_primary_with_bunit(
         out_dnde_A,
         loopA_dnde,
-        hdr,
+        hdr_out,
         "ph cm-2 s-1 sr-1 MeV-1",
         [
             "Loop A template: Shell 1 only",
@@ -324,7 +419,7 @@ def main():
     write_primary_with_bunit(
         out_e2_A,
         loopA_E2dnde,
-        hdr,
+        hdr_out,
         "MeV cm-2 s-1 sr-1",
         [
             "Loop A geometric template: E^2 dN/dE",
@@ -333,7 +428,7 @@ def main():
     write_primary_with_bunit(
         out_mu_A,
         mu_loopA,
-        hdr,
+        hdr_out,
         "counts",
         [
             "Loop A geometric template: expected counts per bin per pixel",
@@ -343,7 +438,7 @@ def main():
     write_primary_with_bunit(
         out_dnde_B,
         loopB_dnde,
-        hdr,
+        hdr_out,
         "ph cm-2 s-1 sr-1 MeV-1",
         [
             "Loop B template: Shell 2 only",
@@ -352,7 +447,7 @@ def main():
     write_primary_with_bunit(
         out_e2_B,
         loopB_E2dnde,
-        hdr,
+        hdr_out,
         "MeV cm-2 s-1 sr-1",
         [
             "Loop B geometric template: E^2 dN/dE",
@@ -361,12 +456,14 @@ def main():
     write_primary_with_bunit(
         out_mu_B,
         mu_loopB,
-        hdr,
+        hdr_out,
         "counts",
         [
             "Loop B geometric template: expected counts per bin per pixel",
         ],
     )
+
+    np.savez(os.path.join(args.outdir, "loopI_rescale_factors.npz"), scales_I=scales_I, scales_A=scales_A, scales_B=scales_B)
 
     print("✓ Wrote:")
     print(" ", out_mu)

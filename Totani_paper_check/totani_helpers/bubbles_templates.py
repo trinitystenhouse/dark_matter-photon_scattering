@@ -86,23 +86,52 @@ def resolve_overlap(
 def build_flat_counts_template(
     *,
     mask2d: np.ndarray,
+    roi2d: np.ndarray | None = None,
     expo: np.ndarray,
     omega: np.ndarray,
     dE_mev: np.ndarray,
+    Ectr_mev: np.ndarray,
+    iso_target_E2: float = 1e-4,
 ) -> np.ndarray:
     m = np.asarray(mask2d, dtype=bool)
+    roi = None if roi2d is None else np.asarray(roi2d, dtype=bool)
     expo = np.asarray(expo, dtype=float)
     omega = np.asarray(omega, dtype=float)
     dE = np.asarray(dE_mev, dtype=float).reshape(-1)
+    Ectr = np.asarray(Ectr_mev, dtype=float).reshape(-1)
 
     nE, ny, nx = expo.shape
+    if expo.ndim != 3:
+        raise ValueError(f"expo must be 3D (nE,ny,nx); got shape {expo.shape}")
     if omega.shape != (ny, nx):
         raise ValueError(f"omega shape {omega.shape} != {(ny, nx)}")
     if dE.shape[0] != nE:
         raise ValueError(f"dE shape {dE.shape} != ({nE},)")
+    if Ectr.shape[0] != nE:
+        raise ValueError(f"Ectr_mev shape {Ectr.shape} != ({nE},)")
 
-    mu = expo * (omega[None, :, :] * dE[:, None, None])
+    # Build a spatial-only template and normalize it over the ROI for fitter stability.
+    # Convention: mean(template) = 1 within ROI (including zeros).
+    T = m.astype(float)
+    if roi is not None:
+        vals = T[roi]
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            raise RuntimeError("Bubbles template has no finite pixels in ROI")
+        mroi = float(np.mean(vals))
+        if (not np.isfinite(mroi)) or (mroi <= 0.0):
+            raise RuntimeError("Bubbles ROI mean is invalid; cannot normalize")
+        T = T / mroi
+
+    Iref = float(iso_target_E2) / (Ectr**2)
+    mu = Iref[:, None, None] * expo * (omega[None, :, :] * dE[:, None, None])
+    mu *= T[None, :, :]
     mu[:, ~m] = 0.0
+    if mu.shape != (nE, ny, nx):
+        raise RuntimeError(f"mu shape {mu.shape} != {(nE, ny, nx)}")
+    ok = np.isfinite(expo) & (expo > 0)
+    if not np.all(np.isfinite(mu[ok])):
+        raise RuntimeError("bubbles mu has non-finite values where expo>0")
     return mu
 
 
@@ -252,6 +281,8 @@ def iterate_bubbles_masks(
     expo: np.ndarray,
     omega: np.ndarray,
     dE_mev: np.ndarray,
+    Ectr_mev: np.ndarray,
+    iso_target_E2: float = 1e-4,
     templates_counts: Dict[str, np.ndarray],
     base_component_order: Sequence[str],
     roi2d: np.ndarray,
@@ -275,12 +306,15 @@ def iterate_bubbles_masks(
     expo = np.asarray(expo, dtype=float)
     omega = np.asarray(omega, dtype=float)
     dE = np.asarray(dE_mev, dtype=float).reshape(-1)
+    Ectr = np.asarray(Ectr_mev, dtype=float).reshape(-1)
 
     nE, ny, nx = counts.shape
     if expo.shape != counts.shape:
         raise ValueError("expo shape mismatch")
     if omega.shape != (ny, nx):
         raise ValueError("omega shape mismatch")
+    if Ectr.shape[0] != nE:
+        raise ValueError(f"Ectr_mev shape {Ectr.shape} != ({nE},)")
 
     roi2d = np.asarray(roi2d, dtype=bool)
     lat = np.asarray(lat_deg_2d, dtype=float)
@@ -331,8 +365,22 @@ def iterate_bubbles_masks(
             templates_list.append(np.asarray(templates_counts[name], float))
 
         if it > 0:
-            mu_pos = build_flat_counts_template(mask2d=pos_mask, expo=expo, omega=omega, dE_mev=dE)
-            mu_neg = build_flat_counts_template(mask2d=neg_mask, expo=expo, omega=omega, dE_mev=dE)
+            mu_pos = build_flat_counts_template(
+                mask2d=pos_mask,
+                expo=expo,
+                omega=omega,
+                dE_mev=dE,
+                Ectr_mev=Ectr,
+                iso_target_E2=float(iso_target_E2),
+            )
+            mu_neg = build_flat_counts_template(
+                mask2d=neg_mask,
+                expo=expo,
+                omega=omega,
+                dE_mev=dE,
+                Ectr_mev=Ectr,
+                iso_target_E2=float(iso_target_E2),
+            )
             templates_list.extend([mu_pos, mu_neg])
 
         coeffs = nnls_fit_per_energy(counts=counts, templates=templates_list, mask3d=fit_mask3d, ridge=ridge)

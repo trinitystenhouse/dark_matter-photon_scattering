@@ -139,8 +139,37 @@ def totani_init_from_mu_counts(
             if E2_at_f1 <= 0 or not np.isfinite(E2_at_f1):
                 raise RuntimeError(f"Inferred iso E^2 dN/dE at f=1 is invalid: {E2_at_f1}")
             f0[jiso] = iso_target_E2 / E2_at_f1
+        
+    iso_counts_sum_f1 = mu[jiso].sum()
+    iso_counts_sum_init = f0[jiso] * iso_counts_sum_f1
+    print(f"iso sum counts (f=1):   {iso_counts_sum_f1:.3e}")
+    print(f"iso sum counts (init):  {iso_counts_sum_init:.3e}")
+    print(f"iso implied E2 dN/dE (f=1): {E2I:.3e}")
+    print(f"iso f_init: {f0[jiso]:.3e}")
 
     return f0
+import numpy as np
+from typing import Sequence, Tuple, Optional
+
+def logprior_bounds_inclusive(x: np.ndarray, bounds: Sequence[Tuple[float, float]]) -> float:
+    x = np.asarray(x, float)
+    for j, (lo, hi) in enumerate(bounds):
+        v = x[j]
+        if not np.isfinite(v):
+            return -np.inf
+        if np.isfinite(lo) and (v < lo):
+            return -np.inf
+        if np.isfinite(hi) and (v > hi):
+            return -np.inf
+    return 0.0
+
+
+def loglike_poisson_counts(Cobs: np.ndarray, Cexp: np.ndarray) -> float:
+    # Drop constants (log(y!)); requires Cexp > 0
+    if np.any(~np.isfinite(Cexp)) or np.any(Cexp <= 0):
+        return -np.inf
+    return float(np.sum(Cobs * np.log(Cexp) - Cexp))
+
 
 def totani_mcmc_fit(
     *,
@@ -167,7 +196,7 @@ def totani_mcmc_fit(
     rng: Optional[np.random.Generator] = None,
     progress: bool = False,
     verbosity: int = 2,
-) -> MCMCResult:
+):
     def vprint(level: int, *args, **kwargs):
         if int(verbosity) >= int(level):
             print(*args, **kwargs)
@@ -181,12 +210,15 @@ def totani_mcmc_fit(
     ncomp, npix = mu.shape
     if Cobs.shape[0] != npix:
         raise ValueError(f"Cobs has {Cobs.shape[0]} entries but mu has {npix}.")
+
     labels = list(labels)
     if len(labels) != ncomp:
         raise ValueError("labels length must match mu.shape[0].")
+
     f_init = np.asarray(f_init, dtype=float)
     if f_init.shape != (ncomp,):
         raise ValueError("f_init must be shape (ncomp,).")
+
     if len(bounds) != ncomp:
         raise ValueError("bounds length must match ncomp.")
 
@@ -201,7 +233,6 @@ def totani_mcmc_fit(
         return -0.5 * (z / float(sigma_dex)) ** 2
 
     def _log10_ratio_gauss_upper_only(x: float, x0: float, sigma_dex: float) -> float:
-        """Upper-only version: no penalty if x <= x0, Gaussian penalty in log-space if x > x0."""
         if (sigma_dex is None) or (sigma_dex <= 0) or (not np.isfinite(sigma_dex)):
             return 0.0
         if (not np.isfinite(x)) or (not np.isfinite(x0)) or (x <= 0) or (x0 <= 0):
@@ -221,15 +252,14 @@ def totani_mcmc_fit(
                 if key in labels_l:
                     jiso = labels_l.index(key)
                     break
+
             if jiso is not None:
-                center = iso_prior_center
-                if center is None:
-                    center = float(f_init[jiso])
+                center = float(iso_prior_center) if (iso_prior_center is not None) else float(f_init[jiso])
                 mode = str(iso_prior_mode).strip().lower()
-                if mode == "f_upper":
-                    lp_i = _log10_ratio_gauss_upper_only(float(f[jiso]), float(center), float(iso_prior_sigma_dex))
+                if mode in ("f_upper", "upper", "upper_only"):
+                    lp_i = _log10_ratio_gauss_upper_only(float(f[jiso]), center, float(iso_prior_sigma_dex))
                 else:
-                    lp_i = _log10_ratio_gauss(float(f[jiso]), float(center), float(iso_prior_sigma_dex))
+                    lp_i = _log10_ratio_gauss(float(f[jiso]), center, float(iso_prior_sigma_dex))
                 if not np.isfinite(lp_i):
                     return -np.inf
                 lp += lp_i
@@ -253,25 +283,32 @@ def totani_mcmc_fit(
         lp = logprior_bounds_inclusive(f, bounds)
         if not np.isfinite(lp):
             return -np.inf
+
         lp_g = logprior_gaussian(f)
         if not np.isfinite(lp_g):
             return -np.inf
-        Cexp = f @ mu
-        ll = loglike_poisson_counts(Cobs, Cexp)
-        return lp + lp_g + ll
 
-    # -------------------------------------------------------------------------
-    # Initialize walkers near f_init, making sure each has finite logprob
-    # -------------------------------------------------------------------------
+        # Expected counts (npix,)
+        Cexp = f @ mu
+
+        # Poisson requires strictly positive expectation everywhere in the fit mask
+        ll = loglike_poisson_counts(Cobs, Cexp)
+        if not np.isfinite(ll):
+            return -np.inf
+
+        return float(lp + lp_g + ll)
+
+    # --------------------------
+    # Initialize walkers
+    # --------------------------
     p0 = np.zeros((nwalkers, ncomp), dtype=float)
     scale = init_jitter_frac * (np.abs(f_init) + 1.0)
 
     for w in range(nwalkers):
         trial = f_init + rng.normal(0.0, scale, size=ncomp)
 
-        # Try a bunch of times to get a finite logprob start
         for _ in range(200):
-            # Enforce bounds by repairing any offending dimensions
+            # repair bounds component-wise
             ok = True
             for j, (lo, hi) in enumerate(bounds):
                 x = trial[j]
@@ -286,15 +323,10 @@ def totani_mcmc_fit(
 
             if ok and np.isfinite(logprob_fn(trial)):
                 break
-
-            # otherwise, resample entire vector (helps if Cexp<=0 issues)
             trial = f_init + rng.normal(0.0, scale, size=ncomp)
 
         p0[w, :] = trial
 
-    # -------------------------------------------------------------------------
-    # Diagnose + respawn any remaining invalid walkers
-    # -------------------------------------------------------------------------
     lp0 = np.array([logprob_fn(p0[w]) for w in range(nwalkers)], dtype=float)
     good = np.isfinite(lp0)
     if good.sum() < max(2, ncomp + 1):
@@ -304,7 +336,6 @@ def totani_mcmc_fit(
     good_idx = np.where(good)[0]
     for w in bad_idx:
         src = rng.choice(good_idx)
-        # tiny jitter around a valid walker, then repair bounds if needed
         trial = p0[src] + rng.normal(0.0, 1e-4 * (np.abs(p0[src]) + 1.0), size=ncomp)
 
         for _ in range(200):
@@ -325,35 +356,21 @@ def totani_mcmc_fit(
 
         p0[w] = trial
 
-    # Final check
     lp0 = np.array([logprob_fn(p0[w]) for w in range(nwalkers)], dtype=float)
     n_bad = int(np.sum(~np.isfinite(lp0)))
     vprint(2, f"Init walkers finite: {nwalkers - n_bad}/{nwalkers}  (respawned {len(bad_idx)})")
     if n_bad:
-        # It's safer to fail than to run with dead walkers.
         raise RuntimeError(f"{n_bad} walkers still have -inf logprob after respawn; check bounds/Cexp positivity.")
 
-    # -------------------------------------------------------------------------
-    # Run sampler
-    # -------------------------------------------------------------------------
+    # --------------------------
+    # Run emcee
+    # --------------------------
     used_emcee = False
     try:
         import emcee  # type: ignore
         used_emcee = True
 
-        heart_sample = None
-        try:
-            from helpers.heartbar import emcee_heart_sample as heart_sample  # type: ignore
-        except Exception:
-            heart_sample = None
-
-        def _run_emcee(initial_state, n_iter: int, *, do_progress: bool):
-            if bool(do_progress) and (heart_sample is not None):
-                last_state = None
-                for last_state in heart_sample(sampler, initial_state, nsteps=int(n_iter), desc="emcee"):
-                    pass
-                return last_state
-            return sampler.run_mcmc(initial_state, int(n_iter), progress=do_progress)
+        sampler = emcee.EnsembleSampler(nwalkers, ncomp, logprob_fn)
 
         def _report_autocorr_status(*, n_done: int):
             try:
@@ -361,25 +378,19 @@ def totani_mcmc_fit(
                 n_over_tau = float(n_done) / tau
                 if np.any(~np.isfinite(n_over_tau)):
                     raise RuntimeError(f"Non-finite N/tau encountered: {n_over_tau}")
-
                 ok = bool(np.all(n_over_tau >= float(autocorr_target)))
                 if int(verbosity) >= 2:
                     vprint(2, "tau:", tau)
                     vprint(2, "N/tau:", n_over_tau)
-
                 if int(verbosity) >= 1:
                     min_not = float(np.min(n_over_tau))
-                    if ok:
-                        vprint(1, f"autocorr status: achieved (min N/tau={min_not:.3f} >= {float(autocorr_target):g})")
-                    else:
-                        vprint(1, f"autocorr status: NOT achieved (min N/tau={min_not:.3f} < {float(autocorr_target):g})")
+                    vprint(1, f"autocorr status: {'achieved' if ok else 'NOT achieved'} (min N/tau={min_not:.3f})")
             except Exception as e:
                 if int(verbosity) >= 2:
                     vprint(2, "autocorr time not available yet:", repr(e))
                 if int(verbosity) >= 1:
                     vprint(1, "autocorr status: unavailable")
 
-        sampler = emcee.EnsembleSampler(nwalkers, ncomp, logprob_fn)
         if early_stop:
             total = int(nsteps)
             step = max(1, int(autocorr_check_every))
@@ -389,12 +400,10 @@ def totani_mcmc_fit(
 
             while n_done < total:
                 n_chunk = min(step, total - n_done)
-                state = _run_emcee(p0 if state is None else state, n_chunk, do_progress=progress)
+                state = sampler.run_mcmc(p0 if state is None else state, int(n_chunk), progress=progress)
                 n_done += int(n_chunk)
 
-                if n_done < min_steps:
-                    continue
-                if n_done <= burn:
+                if n_done < min_steps or n_done <= burn:
                     continue
 
                 try:
@@ -402,76 +411,30 @@ def totani_mcmc_fit(
                     n_over_tau = n_done / tau
                     if np.any(~np.isfinite(n_over_tau)):
                         raise RuntimeError(f"Non-finite N/tau encountered: {n_over_tau}")
-                    if bool(early_stop) and np.all(n_over_tau >= float(autocorr_target)):
+                    if np.all(n_over_tau >= float(autocorr_target)):
                         vprint(2, "tau:", tau)
                         vprint(2, "N/tau:", n_over_tau)
-                        vprint(2, f"Early stop: reached N/tau >= {float(autocorr_target):g} for all params at N={n_done}")
+                        vprint(2, f"Early stop: reached N/tau >= {float(autocorr_target):g} at N={n_done}")
                         break
                 except Exception as e:
                     if bool(require_autocorr):
                         raise RuntimeError(f"Autocorr convergence check requested but failed: {repr(e)}") from e
-                    # Not available yet; keep going.
-                    pass
 
-            # Final report (best effort)
             _report_autocorr_status(n_done=int(n_done))
         else:
-            _run_emcee(p0, nsteps, do_progress=progress)
-            try:
-                tau = sampler.get_autocorr_time(tol=0)
-                vprint(2, "tau:", tau)
-                n_over_tau = nsteps / tau
-                vprint(2, "N/tau:", n_over_tau)
-                # Totani-style rule of thumb: require sufficiently many autocorrelation times.
-                # Enforce N/tau >= 50 for all parameters.
-                if np.any(~np.isfinite(n_over_tau)):
-                    raise RuntimeError(f"Non-finite N/tau encountered: {n_over_tau}")
-                if np.any(n_over_tau < float(autocorr_target)):
-                    bad = np.where(n_over_tau < float(autocorr_target))[0].tolist()
-                    raise RuntimeError(
-                        f"Autocorr convergence check failed: N/tau < {float(autocorr_target):g} for parameter indices {bad}. "
-                        f"Min N/tau={float(np.min(n_over_tau)):.3f}. Increase nsteps."
-                    )
-            except Exception as e:
-                if bool(require_autocorr):
-                    raise RuntimeError(f"Autocorr convergence check requested but failed: {repr(e)}") from e
-                vprint(2, "autocorr time not available yet:", repr(e))
-
+            sampler.run_mcmc(p0, int(nsteps), progress=progress)
             _report_autocorr_status(n_done=int(nsteps))
+
         chain = sampler.get_chain()
         logprob = sampler.get_log_prob()
         acc = sampler.acceptance_fraction
+
     except Exception:
-        # Simple RW Metropolis fallback
-        chain = np.zeros((nsteps, nwalkers, ncomp), dtype=float)
-        logprob = np.full((nsteps, nwalkers), -np.inf, dtype=float)
-        acc = np.zeros(nwalkers, dtype=float)
+        raise  # keep your fallback if you want; but this is usually better to fail loudly here
 
-        current = p0.copy()
-        current_lp = np.array([logprob_fn(current[w]) for w in range(nwalkers)], dtype=float)
-        prop_scale = 0.05 * (np.abs(f_init) + 1.0)
-
-        for t in range(nsteps):
-            for w in range(nwalkers):
-                proposal = current[w] + rng.normal(0.0, prop_scale, size=ncomp)
-                if not np.isfinite(logprior_bounds_inclusive(proposal, bounds)):
-                    lp_new = -np.inf
-                else:
-                    lp_new = logprob_fn(proposal)
-
-                if np.isfinite(lp_new) and (np.log(rng.random()) < (lp_new - current_lp[w])):
-                    current[w] = proposal
-                    current_lp[w] = lp_new
-                    acc[w] += 1.0
-
-            chain[t] = current
-            logprob[t] = current_lp
-
-        acc /= float(nsteps)
-
-    # -------------------------------------------------------------------------
+    # --------------------------
     # Summarize posterior
-    # -------------------------------------------------------------------------
+    # --------------------------
     nsteps_eff = int(chain.shape[0])
     if burn >= nsteps_eff:
         raise ValueError(f"burn must be < nsteps_done. burn={burn}, nsteps_done={nsteps_eff}")
@@ -479,10 +442,7 @@ def totani_mcmc_fit(
     post = chain[burn::thin, :, :].reshape(-1, ncomp)
     post_lp = logprob[burn::thin, :].reshape(-1)
     if post.shape[0] == 0:
-        raise RuntimeError(
-            f"No posterior samples available after burn/thin. "
-            f"nsteps_done={nsteps_eff}, burn={burn}, thin={thin}."
-        )
+        raise RuntimeError(f"No posterior samples after burn/thin. nsteps_done={nsteps_eff}, burn={burn}, thin={thin}.")
 
     imax = int(np.nanargmax(post_lp))
     f_ml = post[imax].copy()

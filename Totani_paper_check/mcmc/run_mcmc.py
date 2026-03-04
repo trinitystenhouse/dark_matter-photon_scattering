@@ -11,6 +11,13 @@ try:
 except Exception:  # pragma: no cover
     tqdm = None
 
+try:
+    from helpers.heartbar import heart_tqdm as _heart_tqdm  # type: ignore
+except Exception:  # pragma: no cover
+    _heart_tqdm = None
+
+_tqdm = _heart_tqdm if _heart_tqdm is not None else tqdm
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from totani_helpers.totani_io import (
     lonlat_grids,
@@ -39,6 +46,31 @@ REPO_DIR = os.environ.get(
 )
 DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani")
 
+def rescale_templates_to_data_sum(mu, labels, Cobs_vec, *, targets=("loopa","loopb","fb_flat","fb","nfw")):
+    """
+    Rescale selected templates so sum(mu_j) ~= sum(data) in the current bin/mask.
+    Returns (mu_scaled, scale_factors) where:
+      mu_scaled[j] = mu[j] * scale_factors[label]
+    """
+    mu = np.asarray(mu, float).copy()
+    labels_l = [str(x).lower() for x in labels]
+    y = float(np.sum(Cobs_vec))
+    if y <= 0 or not np.isfinite(y):
+        raise ValueError(f"Bad data sum {y}; cannot rescale.")
+
+    scales = {}
+    for j, lab in enumerate(labels_l):
+        hit = any(t in lab for t in targets)
+        if not hit:
+            continue
+        s = float(np.sum(mu[j]))
+        if (not np.isfinite(s)) or (s <= 0):
+            continue
+        fac = y / s
+        mu[j] *= fac
+        scales[labels[j]] = fac
+
+    return mu, scales
 
 def build_roi_box_mask(lon, lat, roi_lon=60.0, roi_lat=60.0):
     return (np.abs(lon) <= roi_lon) & (np.abs(lat) <= roi_lat)
@@ -84,69 +116,149 @@ def aggregate_to_cells(*, x2d, mask2d, cell_id_map, ncells=144):
     return x_cells, npix_cells
 
 
+def template_scale_report(k, Cobs_vec, mu, labels):
+    y = float(np.sum(Cobs_vec))
+    print(f"bin k={k}: data sum={y:.3e}")
+    for j, lab in enumerate(labels):
+        s = float(np.sum(mu[j]))
+        med = float(np.median(mu[j]))
+        mx = float(np.max(mu[j]))
+        print(
+            f"  {str(lab):12s}  sum(mu@f=1)={s:.3e}  median={med:.3e}  max={mx:.3e}  "
+            f"ratio_to_data={s / y if y > 0 else np.nan:.3e}"
+        )
+
+
+import numpy as np
+
 # -----------------------------------------------------------------------------
 # Totani-style init for YOUR parameterisation (mu are counts-space templates)
 # -----------------------------------------------------------------------------
-def _infer_E2dNdE_for_iso_at_f1(mu_iso_vec, denom_vec, Ectr_mev):
+def infer_iso_E2dNdE_at_f1(mu_iso_vec, denom_vec, Ectr_mev, *, require_mu_positive=True):
     """
-    mu_iso_vec : counts vector for iso template at f_iso=1 (masked pixels)
-    denom_vec  : expo*omega*dE for the same pixels [cm^2 s sr MeV]
-    Returns:
-      (E2I, I_med) where I_med is dN/dE [MeV^-1 cm^-2 s^-1 sr^-1]
+    Infer isotropic intensity from a counts-space iso template evaluated at f_iso=1.
+
+    Inputs
+    ------
+    mu_iso_vec : (npix,) expected counts per pixel for isotropic template at f_iso=1
+                (already includes exposure*Omega*dE)
+    denom_vec  : (npix,) exposure*Omega*dE per pixel  [cm^2 s sr MeV]
+    Ectr_mev   : scalar, bin center energy [MeV]
+
+    Returns
+    -------
+    E2I   : scalar, E^2 dN/dE  [MeV cm^-2 s^-1 sr^-1]
+    I_med : scalar, dN/dE      [MeV^-1 cm^-2 s^-1 sr^-1]
     """
-    mu_iso_vec = np.asarray(mu_iso_vec, float)
-    denom_vec = np.asarray(denom_vec, float)
+    mu_iso_vec = np.asarray(mu_iso_vec, float).reshape(-1)
+    denom_vec  = np.asarray(denom_vec,  float).reshape(-1)
+
     good = np.isfinite(mu_iso_vec) & np.isfinite(denom_vec) & (denom_vec > 0)
+    if require_mu_positive:
+        good &= (mu_iso_vec > 0)
+
     if not np.any(good):
-        raise RuntimeError("Cannot infer isotropic normalization: denom_vec has no valid entries.")
+        raise RuntimeError(
+            "Cannot infer isotropic normalization: need finite denom>0"
+            + (" and mu_iso>0" if require_mu_positive else "")
+            + " on at least one pixel."
+        )
+
     I_med = float(np.median(mu_iso_vec[good] / denom_vec[good]))
-    E2I = float((Ectr_mev**2) * I_med)
+    E2I   = float((float(Ectr_mev) ** 2) * I_med)
+
     return E2I, I_med
 
 
 def build_totani_init_for_mu_counts(
     *,
     labels,
-    mu,             # (ncomp, npix) counts-space templates for this energy bin in the fit mask
-    denom_vec,      # (npix,) expo*omega*dE for same pixels
+    mu,              # (ncomp, npix) counts-space templates within the fit mask
+    denom_vec,       # (npix,) expo*omega*dE for the same masked pixels
     Ectr_mev,
-    iso_target_E2=1e-4,  # If None, iso starts at f=1 like other physical templates
+    iso_target_E2=1e-4,          # set None to skip Totani iso target
+    iso_keys=("iso", "isotropic"),
+    start_at_one_keys=("ps", "point_sources", "pointsources", "gas", "ics"),
+    require_mu_positive_for_iso=True,
     verbosity: int = 2,
 ):
     """
-    Totani text says:
-      - PS + GALPROP start at original normalization  -> for you, f=1.0
-      - isotropic initial E^2 dN/dE = 1e-4          -> for you, convert to dimensionless f_iso
-      - others start at 0
-    """
-    
-    labels_l = [s.lower() for s in labels]
-    ncomp = len(labels)
-    f0 = np.zeros(ncomp, float)
+    Totani-style initialization for coefficients f (dimensionless scalings):
 
-    # Physical templates with known normalization: start at f=1
+      - PS + GALPROP-like components start at f=1.0 (your mu are already in counts space)
+      - isotropic starts at E^2 dN/dE = 1e-4 (MeV cm^-2 s^-1 sr^-1) by rescaling f_iso
+      - all other components start at 0
+
+    Returns
+    -------
+    f0 : (ncomp,) initial coefficient vector
+    info : dict with iso diagnostic numbers (or empty if no iso found / disabled)
+    """
+    labels = list(labels)
+    labels_l = [str(s).lower() for s in labels]
+
+    mu = np.asarray(mu, float)
+    if mu.ndim != 2:
+        raise ValueError("mu must be 2D (ncomp, npix).")
+    ncomp, npix = mu.shape
+
+    denom_vec = np.asarray(denom_vec, float).reshape(-1)
+    if denom_vec.shape[0] != npix:
+        raise ValueError(f"denom_vec length {denom_vec.shape[0]} does not match mu npix={npix}.")
+
+    f0 = np.zeros(ncomp, dtype=float)
+
+    # Start-at-one components
+    start_at_one = {k.lower() for k in start_at_one_keys}
     for j, lab in enumerate(labels_l):
-        if lab in ("ps", "point_sources", "pointsources", "gas", "ics", "iso", "isotropic"):
+        if lab in start_at_one:
             f0[j] = 1.0
 
-    # Optional: rescale iso to target E^2 dN/dE (legacy Totani behavior)
+    info = {}
+
+    # Optional: rescale iso to target E^2 dN/dE
     if iso_target_E2 is not None:
-        if "iso" in labels_l or "isotropic" in labels_l:
-            jiso = labels_l.index("iso") if "iso" in labels_l else labels_l.index("isotropic")
-            E2I, I_med = _infer_E2dNdE_for_iso_at_f1(mu[jiso], denom_vec, Ectr_mev)
-            f0[jiso] = iso_target_E2 / E2I
+        jiso = None
+        for k in iso_keys:
+            kk = str(k).lower()
+            if kk in labels_l:
+                jiso = labels_l.index(kk)
+                break
+
+        if jiso is not None:
+            E2_at_f1, I_med = infer_iso_E2dNdE_at_f1(
+                mu[jiso], denom_vec, Ectr_mev, require_mu_positive=require_mu_positive_for_iso
+            )
+
+            if (not np.isfinite(E2_at_f1)) or (E2_at_f1 <= 0):
+                raise RuntimeError(f"Inferred iso E^2 dN/dE at f=1 is invalid: {E2_at_f1}")
+
+            f0[jiso] = float(iso_target_E2) / float(E2_at_f1)
 
             if int(verbosity) >= 2:
-                print("\nIsotropic init conversion (legacy mode):")
-                print(f"  iso at f=1 implies E^2 dN/dE = {E2I:.6e}  [MeV cm^-2 s^-1 sr^-1]")
-                print(f"  target E^2 dN/dE           = {iso_target_E2:.6e}")
-                print(f"  ==> set f_iso_init         = {f0[jiso]:.6e}")
+                iso_counts_sum_f1   = float(np.sum(mu[jiso]))
+                iso_counts_sum_init = float(f0[jiso] * iso_counts_sum_f1)
 
-    # all other components: start at 0 (already)
+                print("\nIsotropic init conversion (Totani-style):")
+                print(f"  iso label                 = {labels[jiso]}")
+                print(f"  iso at f=1 => E^2 dN/dE    = {E2_at_f1:.6e}  [MeV cm^-2 s^-1 sr^-1]")
+                print(f"  target E^2 dN/dE           = {float(iso_target_E2):.6e}")
+                print(f"  ==> f_iso_init             = {f0[jiso]:.6e}")
+                print(f"  iso sum counts (f=1)       = {iso_counts_sum_f1:.3e}")
+                print(f"  iso sum counts (init)      = {iso_counts_sum_init:.3e}")
 
-    return f0
+            info = dict(
+                jiso=int(jiso),
+                iso_label=str(labels[jiso]),
+                E2_at_f1=float(E2_at_f1),
+                I_med=float(I_med),
+                f_iso_init=float(f0[jiso]),
+            )
+        else:
+            if int(verbosity) >= 2:
+                print("No isotropic label found; skipping iso target init.")
 
-
+    return f0, info
 def tighten_negative_bound_for_single_halo(*, mu_halo, Cbase, safety=0.999):
     """
     If you allow f_halo < 0, you *still* must keep Cexp = Cbase + f_halo*mu_halo > 0.
@@ -402,6 +514,15 @@ def main():
         help="Enable/disable anchoring the isotropic prior center to --iso-anchor-e2 (default: enabled).",
     )
     ap.add_argument(
+        "--iso-floor-e2",
+        type=float,
+        default=1e-4,
+        help=(
+            "Isotropic floor in E^2 dN/dE [MeV cm^-2 s^-1 sr^-1]. Converted per energy bin to a lower bound on f_iso. "
+            "Set <=0 to disable."
+        ),
+    )
+    ap.add_argument(
         "--iso-prior-sigma-dex",
         type=float,
         default=0.5,
@@ -562,8 +683,8 @@ def main():
 
     # ---- Load counts + EBOUNDS
     pbar = None
-    if (verbosity > 0) and (tqdm is not None):
-        pbar = tqdm(total=4, desc="Loading FITS")
+    if (verbosity > 0) and (_tqdm is not None):
+        pbar = _tqdm(total=4, desc="Loading FITS")
 
     counts, hdr, Emin, Emax, Ectr_mev, dE_mev = read_counts_and_ebounds(args.counts)
     nE, ny, nx = counts.shape
@@ -727,9 +848,9 @@ def main():
 
     mu = mu_cells_full[:, cell_keep].astype(float)
 
-    # denom_cells for isotropic conversion (and sanity)
+    # denom_vec: (expo * omega * dE) aggregated into cells and restricted to kept cells.
     denom_map = expo[k] * omega * dE_k
-    denom_cells, _npix = aggregate_to_cells(
+    denom_cells, _npix_cells_denom = aggregate_to_cells(
         x2d=denom_map,
         mask2d=mask_k,
         cell_id_map=cell_id_map,
@@ -737,8 +858,34 @@ def main():
     )
     denom_vec = denom_cells[cell_keep].astype(float)
 
-    # ---- Initialize parameters (THIS is the critical change)
-    f0 = build_totani_init_for_mu_counts(
+    # Rescale isotropic template so that f_iso=1 corresponds to E^2 dN/dE = args.iso_anchor_e2.
+    # This makes the anchored prior center and initialization live near f_iso~1.
+    labels_l = [str(x).lower() for x in labels]
+    if bool(args.iso_anchor) and (args.iso_anchor_e2 is not None):
+        jiso = None
+        for key in ("iso", "isotropic"):
+            if key in labels_l:
+                jiso = labels_l.index(key)
+                break
+        if jiso is not None:
+            E2I, _I_med = infer_iso_E2dNdE_at_f1(mu[jiso], denom_vec, Ectr_k)
+            if (not np.isfinite(E2I)) or (E2I <= 0.0):
+                raise RuntimeError(
+                    "Cannot anchor isotropic template in fit: inferred E^2 dN/dE at f=1 is non-finite or non-positive."
+                )
+            scale = float(args.iso_anchor_e2) / float(E2I)
+            mu[jiso] *= float(scale)
+            vprint(
+                2,
+                f"[iso template anchor] E2(f=1)={float(E2I):.6e} target={float(args.iso_anchor_e2):.6e} => mu_iso *= {float(scale):.6e}",
+            )
+
+    if verbosity >= 2:
+        print("\nTemplate scales (cell space, f=1):")
+        template_scale_report(k=k, Cobs_vec=Cobs, mu=mu, labels=labels)
+
+    # ---- Initialize parameters
+    f0, _init_info = build_totani_init_for_mu_counts(
         labels=labels,
         mu=mu,
         denom_vec=denom_vec,
@@ -747,10 +894,9 @@ def main():
         verbosity=verbosity,
     )
     vprint(2, "\nInitializing MCMC (Totani-style, consistent with your mu counts templates)...")
-    vprint(2, f"  Initial values: {dict(zip(labels, f0))}")
+    vprint(2, "f_init by label:", {lab: float(f0[j]) for j, lab in enumerate(labels)})
 
     # Prior centers (Totani init values)
-    labels_l = [str(x).lower() for x in labels]
     nonstable_centers = {}
     for key in ("gas", "ics", "ps", "iso"):
         if key in labels_l:
@@ -769,7 +915,7 @@ def main():
                 break
         if jiso is not None:
             # Convert target E^2 dN/dE to the corresponding f_iso center for this energy bin.
-            E2I, _I_med = _infer_E2dNdE_for_iso_at_f1(mu[jiso], denom_vec, Ectr_k)
+            E2I, _I_med = infer_iso_E2dNdE_at_f1(mu[jiso], denom_vec, Ectr_k)
             if not np.isfinite(E2I) or (E2I <= 0):
                 raise RuntimeError("Cannot anchor iso prior: inferred E^2 dN/dE at f=1 is non-finite or non-positive.")
             iso_center = float(args.iso_anchor_e2) / float(E2I)
@@ -777,6 +923,22 @@ def main():
 
     # ---- Bounds
     bnds = totani_bounds(labels, negative_keys=tuple(negative_keys))
+
+    # Optional: isotropic floor in E2-space -> enforce as a lower bound in f-space for this energy bin.
+    if (args.iso_floor_e2 is not None) and (float(args.iso_floor_e2) > 0):
+        jiso = None
+        for key in ("iso", "isotropic"):
+            if key in labels_l:
+                jiso = labels_l.index(key)
+                break
+        if jiso is not None:
+            E2I, _I_med = infer_iso_E2dNdE_at_f1(mu[jiso], denom_vec, Ectr_k)
+            if not np.isfinite(E2I) or (E2I <= 0):
+                raise RuntimeError("Cannot apply iso floor: inferred E^2 dN/dE at f=1 is non-finite or non-positive.")
+            f_floor = float(args.iso_floor_e2) / float(E2I)
+            lo, hi = bnds[jiso]
+            bnds[jiso] = (max(float(lo), float(f_floor)), hi)
+            vprint(1, f"[iso floor] E2(f=1)={E2I:.6e}  floor={float(args.iso_floor_e2):.6e}  => f_iso>={float(f_floor):.6e}")
 
     tighten_negative_bounds = bool(args.tighten_negative_bounds)
     if args.tighten_halo_neg_bound is not None:
@@ -812,6 +974,8 @@ def main():
             lo_str = f"{lo:.3e}" if np.isfinite(lo) else "-inf"
             hi_str = f"{hi:.3e}" if np.isfinite(hi) else "+inf"
             print(f"    {lab}: [{lo_str}, {hi_str}]")
+    
+
 
     # ---- Run MCMC
     vprint(2, "\nRunning MCMC...")
@@ -845,6 +1009,29 @@ def main():
         print(f"MCMC wall time: {dt:.2f} s  ({dt/60:.2f} min)")
     vprint(2, "acc per walker:", res.acceptance_fraction)
     vprint(2, "n dead:", np.sum(res.acceptance_fraction < 0.02))
+
+    if verbosity >= 1:
+        labels_l_post = [str(x).lower() for x in res.labels]
+        jiso_post = None
+        for key in ("iso", "isotropic"):
+            if key in labels_l_post:
+                jiso_post = labels_l_post.index(key)
+                break
+        if jiso_post is not None:
+            E2_f1, _I_med_f1 = infer_iso_E2dNdE_at_f1(mu[jiso_post], denom_vec, Ectr_k)
+            f_iso_ml = float(res.f_ml[jiso_post])
+            f_iso_p50 = float(res.f_p50[jiso_post])
+            E2_ml = f_iso_ml * float(E2_f1)
+            E2_p50 = f_iso_p50 * float(E2_f1)
+            target = float(args.iso_anchor_e2) if (bool(args.iso_anchor) and (args.iso_anchor_e2 is not None)) else None
+            print(
+                f"[iso] Inferred E^2 dN/dE (this bin, k={k}, Ectr={Ectr_k/1000:.3f} GeV): "
+                f"f=1 -> {float(E2_f1):.6e};  f_ML -> {float(f_iso_ml):.6e};  f_p50 -> {float(f_iso_p50):.6e};  "
+                f"E2_ML -> {float(E2_ml):.6e};  E2_p50 -> {float(E2_p50):.6e} "
+                "[MeV cm^-2 s^-1 sr^-1]"
+            )
+            if target is not None:
+                print(f"[iso] Anchor target: E^2 dN/dE = {float(target):.6e} at f_iso=1 (fit is free to choose f_iso != 1).")
 
     if verbosity >= 2:
         print("\n" + "=" * 60)

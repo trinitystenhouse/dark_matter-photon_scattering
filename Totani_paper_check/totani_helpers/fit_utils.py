@@ -9,6 +9,13 @@ try:
 except Exception:  # pragma: no cover
     tqdm = None
 
+try:
+    from helpers.heartbar import heart_tqdm as _heart_tqdm  # type: ignore
+except Exception:  # pragma: no cover
+    _heart_tqdm = None
+
+_tqdm = _heart_tqdm if _heart_tqdm is not None else tqdm
+
 def data_coverage_mask3d(*, counts, expo):
     """Return True where data coverage exists: finite counts/expo and expo>0."""
     counts = np.asarray(counts)
@@ -256,8 +263,8 @@ def load_mu_templates_from_fits(
     shapes = []
 
     it = labels
-    if bool(progress) and (tqdm is not None):
-        it = tqdm(list(labels), desc=str(progress_desc))
+    if bool(progress) and (_tqdm is not None):
+        it = _tqdm(list(labels), desc=str(progress_desc))
 
     for lab in it:
         path = os.path.join(template_dir, filename_pattern.format(label=lab))
