@@ -1,0 +1,31 @@
+MCMC Fit Results
+Energy bin: k=8, E_ctr=91524.7 MeV (91.525 GeV)
+Components: gas, iso, ps, loopA, loopB, ics, fb_flat, nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno
+MCMC: 64 walkers, 30000 steps, burn=2500, thin=10
+Used emcee: True
+iso init target E^2 dN/dE: 1.000000e-04
+Acceptance fraction: mean=0.359
+Log-likelihood (ML): 50544.340
+
+Component                                                     ML           p16           p50           p84
+----------------------------------------------------------------------------------------------------
+gas                                                 +3.211197e+00  +3.153015e+00  +3.204221e+00  +3.253796e+00
+iso                                                 +2.071287e+01  +2.073439e+01  +2.080851e+01  +2.097052e+01
+ps                                                  +2.789170e-01  +2.520481e-01  +2.726301e-01  +2.938523e-01
+loopA                                               +5.477750e-05  +9.251907e-05  +3.707226e-04  +9.724295e-04
+loopB                                               +1.156541e-04  +1.619998e-04  +6.325978e-04  +1.662063e-03
+ics                                                 +1.011185e-01  +5.875742e-02  +1.047439e-01  +1.737787e-01
+fb_flat                                             +5.408550e-02  +5.012304e-02  +5.358953e-02  +5.715552e-02
+nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno  +3.586650e-02  +3.022903e-02  +3.551540e-02  +4.085750e-02
+
+[CANCELLATION CHECK] bin k=8:
+  data=1.228e+04  model=1.243e+04  model/data=1.01
+  sum(pos comps)=1.243e+04  sum(neg comps)=0.000e+00  cancellation frac=1
+  mu_pix min=1.088e-03  median=5.665e-03
+  top components by |counts|:
+    gas                   +9.118e+03
+    iso                   +1.179e+03
+    ps                    +8.538e+02
+    fb_flat               +6.640e+02
+    nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno  +5.026e+02
+    ics                   +1.151e+02

@@ -1,0 +1,32 @@
+MCMC Fit Results
+Energy bin: k=10, E_ctr=264896.9 MeV (264.897 GeV)
+Components: gas, iso, ps, loopA, loopB, ics, fb_pos, fb_neg, nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno
+MCMC: 64 walkers, 300000 steps, burn=25000, thin=10
+Used emcee: True
+iso init target E^2 dN/dE: 1.000000e-04
+Acceptance fraction: mean=0.324
+Log-likelihood (ML): 598.331
+
+Component                                                     ML           p16           p50           p84
+----------------------------------------------------------------------------------------------------
+gas                                                 +5.223215e-01  +3.174025e-01  +5.581439e-01  +8.546403e-01
+iso                                                 +2.788765e+01  +2.795052e+01  +2.823287e+01  +2.884745e+01
+ps                                                  +1.022031e-01  +7.682862e-02  +9.493932e-02  +1.147997e-01
+loopA                                               +2.429074e-05  +4.382762e-04  +1.741512e-03  +4.579451e-03
+loopB                                               +1.181175e-04  +5.966642e-04  +2.345144e-03  +6.031767e-03
+ics                                                 +2.620919e-01  +1.568588e-01  +3.011700e-01  +5.215572e-01
+fb_pos                                              +5.043975e-03  +3.350330e-03  +8.503452e-03  +1.482587e-02
+fb_neg                                              +2.974909e-02  +2.001811e-02  +2.767045e-02  +3.558098e-02
+nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno  +2.185284e-01  +1.560293e-01  +2.072725e-01  +2.579095e-01
+
+[CANCELLATION CHECK] bin k=10:
+  data=6.420e+02  model=6.853e+02  model/data=1.07
+  sum(pos comps)=6.853e+02  sum(neg comps)=0.000e+00  cancellation frac=1
+  mu_pix min=2.573e-04  median=6.369e-04
+  top components by |counts|:
+    iso                   +3.032e+02
+    nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno  +1.519e+02
+    ps                    +8.262e+01
+    fb_neg                +6.182e+01
+    gas                   +5.708e+01
+    ics                   +1.793e+01

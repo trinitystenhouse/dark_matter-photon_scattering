@@ -1,0 +1,32 @@
+MCMC Fit Results
+Energy bin: k=8, E_ctr=91524.7 MeV (91.525 GeV)
+Components: gas, iso, ps, loopA, loopB, ics, fb_pos, fb_neg, nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno
+MCMC: 64 walkers, 300000 steps, burn=25000, thin=10
+Used emcee: True
+iso init target E^2 dN/dE: 1.000000e-04
+Acceptance fraction: mean=0.343
+Log-likelihood (ML): 12563.300
+
+Component                                                     ML           p16           p50           p84
+----------------------------------------------------------------------------------------------------
+gas                                                 +1.853725e+00  +1.629187e+00  +1.799656e+00  +1.970585e+00
+iso                                                 +2.073209e+01  +2.075239e+01  +2.087975e+01  +2.115699e+01
+ps                                                  +3.064605e-01  +2.765417e-01  +2.988969e-01  +3.219899e-01
+loopA                                               +9.998225e-06  +1.541748e-04  +6.074972e-04  +1.598958e-03
+loopB                                               +5.892571e-06  +3.922908e-04  +1.520670e-03  +3.790262e-03
+ics                                                 +1.980991e-01  +1.035379e-01  +1.911099e-01  +3.213011e-01
+fb_pos                                              +3.728794e-02  +3.334061e-02  +3.680997e-02  +4.033658e-02
+fb_neg                                              +2.187303e-02  +1.985112e-02  +2.302240e-02  +2.626763e-02
+nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno  +8.560288e-02  +6.393346e-02  +8.491465e-02  +1.060077e-01
+
+[CANCELLATION CHECK] bin k=8:
+  data=4.382e+03  model=4.482e+03  model/data=1.02
+  sum(pos comps)=4.482e+03  sum(neg comps)=0.000e+00  cancellation frac=1
+  mu_pix min=1.058e-03  median=3.778e-03
+  top components by |counts|:
+    gas                   +1.456e+03
+    iso                   +9.505e+02
+    ps                    +6.542e+02
+    nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno  +6.084e+02
+    fb_pos                +4.577e+02
+    fb_neg                +2.685e+02

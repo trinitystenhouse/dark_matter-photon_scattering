@@ -1,0 +1,32 @@
+MCMC Fit Results
+Energy bin: k=1, E_ctr=2219.0 MeV (2.219 GeV)
+Components: gas, iso, ps, loopA, loopB, ics, fb_pos, fb_neg, nfw_NFW_g1_rho1_rs21_R08_rvir402_ns2048_normpole_pheno
+MCMC: 64 walkers, 300000 steps, burn=25000, thin=10
+Used emcee: True
+iso init target E^2 dN/dE: 1.000000e-04
+Acceptance fraction: mean=0.377
+Log-likelihood (ML): 9334993.162
+
+Component                                                     ML           p16           p50           p84
+----------------------------------------------------------------------------------------------------
+gas                                                 +3.692897e-01  +3.678328e-01  +3.695726e-01  +3.713125e-01
+iso                                                 +5.528154e+01  +5.528733e+01  +5.530468e+01  +5.534257e+01
+ps                                                  +4.570386e-01  +4.442896e-01  +4.553057e-01  +4.663628e-01
+loopA                                               +2.057574e-07  +1.279049e-06  +5.112126e-06  +1.354511e-05
+loopB                                               +1.528552e-02  +1.498545e-02  +1.534950e-02  +1.571557e-02
+ics                                                 +1.080974e+00  +1.062719e+00  +1.082341e+00  +1.101931e+00
+fb_pos                                              +1.781183e-02  +1.767188e-02  +1.783353e-02  +1.799511e-02
+fb_neg                                              +7.647563e-03  +7.398366e-03  +7.610271e-03  +7.822061e-03
+nfw_NFW_g1_rho1_rs21_R08_rvir402_ns2048_normpole_pheno  +1.863845e-02  +1.735788e-02  +1.846123e-02  +1.956464e-02
+
+[CANCELLATION CHECK] bin k=1:
+  data=1.110e+06  model=1.111e+06  model/data=1
+  sum(pos comps)=1.111e+06  sum(neg comps)=0.000e+00  cancellation frac=1
+  mu_pix min=2.166e-01  median=1.082e+00
+  top components by |counts|:
+    gas                   +6.544e+05
+    ics                   +1.953e+05
+    fb_pos                +6.059e+04
+    nfw_NFW_g1_rho1_rs21_R08_rvir402_ns2048_normpole_pheno  +5.256e+04
+    ps                    +4.292e+04
+    loopB                 +3.981e+04

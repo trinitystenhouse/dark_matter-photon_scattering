@@ -1,0 +1,32 @@
+MCMC Fit Results
+Energy bin: k=8, E_ctr=91524.7 MeV (91.525 GeV)
+Components: gas, iso, ps, loopA, loopB, ics, fb_pos, fb_neg, nfw_NFW_g1_rho1_rs21_R08_rvir402_ns2048_normpole_pheno
+MCMC: 64 walkers, 300000 steps, burn=25000, thin=10
+Used emcee: True
+iso init target E^2 dN/dE: 1.000000e-04
+Acceptance fraction: mean=0.349
+Log-likelihood (ML): 12559.969
+
+Component                                                     ML           p16           p50           p84
+----------------------------------------------------------------------------------------------------
+gas                                                 +2.775804e+00  +2.602005e+00  +2.782230e+00  +2.959279e+00
+iso                                                 +2.072692e+01  +2.078796e+01  +2.102277e+01  +2.153904e+01
+ps                                                  +3.542108e-01  +3.222347e-01  +3.472853e-01  +3.729270e-01
+loopA                                               +8.648351e-05  +3.252686e-04  +1.288023e-03  +3.370639e-03
+loopB                                               +4.896100e-04  +1.087112e-03  +3.682786e-03  +7.817102e-03
+ics                                                 +4.261643e-01  +2.064444e-01  +3.924160e-01  +6.588794e-01
+fb_pos                                              +4.895741e-02  +4.750083e-02  +5.058243e-02  +5.371009e-02
+fb_neg                                              +2.315192e-02  +1.969797e-02  +2.298220e-02  +2.633498e-02
+nfw_NFW_g1_rho1_rs21_R08_rvir402_ns2048_normpole_pheno  -5.161676e-02  -7.168313e-02  -5.730056e-02  -4.306663e-02
+
+[CANCELLATION CHECK] bin k=8:
+  data=4.382e+03  model=4.408e+03  model/data=1.01
+  sum(pos comps)=4.964e+03  sum(neg comps)=-5.561e+02  cancellation frac=0.888
+  mu_pix min=7.754e-04  median=3.328e-03
+  top components by |counts|:
+    gas                   +2.180e+03
+    iso                   +9.503e+02
+    ps                    +7.561e+02
+    fb_pos                +6.010e+02
+    nfw_NFW_g1_rho1_rs21_R08_rvir402_ns2048_normpole_pheno  -5.561e+02
+    fb_neg                +2.842e+02

@@ -1,0 +1,31 @@
+MCMC Fit Results
+Energy bin: k=2, E_ctr=3775.1 MeV (3.775 GeV)
+Components: gas, iso, ps, loopA, loopB, ics, fb_pos, fb_neg
+MCMC: 64 walkers, 300000 steps, burn=25000, thin=10
+Used emcee: True
+iso init target E^2 dN/dE: 1.000000e-04
+Acceptance fraction: mean=0.395
+Log-likelihood (ML): 4165823.543
+
+Component                                                     ML           p16           p50           p84
+----------------------------------------------------------------------------------------------------
+gas                                                 +6.827299e-01  +6.799140e-01  +6.848059e-01  +6.896768e-01
+iso                                                 +4.612471e+01  +4.613179e+01  +4.616092e+01  +4.622506e+01
+ps                                                  +6.432660e-01  +6.348035e-01  +6.480798e-01  +6.613834e-01
+loopA                                               +5.246557e-07  +3.315752e-06  +1.317898e-05  +3.489459e-05
+loopB                                               +1.610365e-02  +1.550048e-02  +1.601838e-02  +1.653433e-02
+ics                                                 +1.624425e+00  +1.582512e+00  +1.612201e+00  +1.641867e+00
+fb_pos                                              +2.207874e-02  +2.186045e-02  +2.207894e-02  +2.229841e-02
+fb_neg                                              +9.135206e-03  +8.749620e-03  +9.057705e-03  +9.364679e-03
+
+[CANCELLATION CHECK] bin k=2:
+  data=5.422e+05  model=5.429e+05  model/data=1
+  sum(pos comps)=5.429e+05  sum(neg comps)=0.000e+00  cancellation frac=1
+  mu_pix min=9.914e-02  median=5.218e-01
+  top components by |counts|:
+    gas                   +3.027e+05
+    ics                   +1.132e+05
+    fb_pos                +3.577e+04
+    ps                    +3.298e+04
+    iso                   +2.342e+04
+    loopB                 +2.002e+04

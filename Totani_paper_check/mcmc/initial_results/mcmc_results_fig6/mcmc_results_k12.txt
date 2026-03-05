@@ -1,0 +1,32 @@
+MCMC Fit Results
+Energy bin: k=12, E_ctr=766682.2 MeV (766.682 GeV)
+Components: gas, iso, ps, loopA, loopB, ics, fb_pos, fb_neg, nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno
+MCMC: 64 walkers, 300000 steps, burn=25000, thin=10
+Used emcee: True
+iso init target E^2 dN/dE: 1.000000e-04
+Acceptance fraction: mean=0.303
+Log-likelihood (ML): -106.490
+
+Component                                                     ML           p16           p50           p84
+----------------------------------------------------------------------------------------------------
+gas                                                 +8.347670e-01  +3.881078e-01  +8.287763e-01  +1.554338e+00
+iso                                                 +1.650063e+01  +1.659588e+01  +1.694959e+01  +1.770881e+01
+ps                                                  +2.294209e-02  +1.749244e-02  +2.869082e-02  +4.399222e-02
+loopA                                               +1.011728e-04  +1.258525e-03  +4.984970e-03  +1.304356e-02
+loopB                                               +4.796680e-04  +2.227467e-03  +8.666292e-03  +2.193295e-02
+ics                                                 +5.334978e-01  +3.383822e-01  +7.248246e-01  +1.385551e+00
+fb_pos                                              +1.008754e-02  +4.364932e-03  +1.392543e-02  +2.849798e-02
+fb_neg                                              +2.736627e-02  +1.432764e-02  +3.297647e-02  +5.297367e-02
+nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno  +3.533519e-03  -8.975640e-02  -3.296432e-02  +2.472520e-02
+
+[CANCELLATION CHECK] bin k=12:
+  data=9.200e+01  model=1.156e+02  model/data=1.26
+  sum(pos comps)=1.156e+02  sum(neg comps)=0.000e+00  cancellation frac=1
+  mu_pix min=6.251e-05  median=1.353e-04
+  top components by |counts|:
+    iso                   +8.019e+01
+    gas                   +1.094e+01
+    fb_neg                +9.004e+00
+    ps                    +6.198e+00
+    ics                   +4.978e+00
+    fb_pos                +3.319e+00

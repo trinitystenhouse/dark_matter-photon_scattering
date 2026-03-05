@@ -1,0 +1,19 @@
+MCMC Fit Results
+Energy bin: k=2, E_ctr=3775.1 MeV (3.775 GeV)
+Components: gas, iso, ps, nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno, loopA, loopB, ics, fb_flat
+MCMC: 64 walkers, 60000 steps, burn=15000, thin=10
+Used emcee: True
+iso init target E^2 dN/dE: 1.000000e-04
+Acceptance fraction: mean=0.402
+Log-likelihood (ML): 14651079.060
+
+Component                                                     ML           p16           p50           p84
+----------------------------------------------------------------------------------------------------
+gas                                                 +8.009505e-01  +7.992629e-01  +8.011541e-01  +8.030309e-01
+iso                                                 +4.744353e-01  +4.853231e-01  +5.486751e-01  +6.632988e-01
+ps                                                  +1.018476e+00  +9.997381e-01  +1.013693e+00  +1.027706e+00
+nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno  +3.874760e-02  +3.846841e-02  +3.897644e-02  +3.947753e-02
+loopA                                               +3.618696e-07  +3.290765e-06  +1.310174e-05  +3.439168e-05
+loopB                                               +3.965302e-03  +3.413547e-03  +3.867918e-03  +4.322342e-03
+ics                                                 +1.310715e+00  +1.288723e+00  +1.308541e+00  +1.328352e+00
+fb_flat                                             +2.532153e-02  +2.505619e-02  +2.532408e-02  +2.559565e-02

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import argparse
+import json
 import os
 import sys
 import numpy as np
@@ -530,11 +532,12 @@ def main():
     )
     ap.add_argument(
         "--iso-prior-mode",
-        choices=["f", "f_upper"],
+        choices=["f", "f_upper", "f_lower"],
         default="f",
         help=(
             "Iso prior mode. 'f' is a symmetric log-prior centered on Totani init f0. "
-            "'f_upper' anchors the starting value but only penalizes excursions above f0 (allows drifting down)."
+            "'f_upper' anchors the starting value but only penalizes excursions above f0 (allows drifting down). "
+            "'f_lower' anchors the starting value but only penalizes excursions below f0 (allows drifting up)."
         ),
     )
     ap.add_argument(
@@ -544,6 +547,22 @@ def main():
         help=(
             "Optional Gaussian priors (dex) in log10(f/f0) for gas/ics/ps/iso, centered on Totani init f0. "
             "Useful to stabilize fits."
+        ),
+    )
+    ap.add_argument(
+        "--nonstable-prior-centers",
+        default=None,
+        help=(
+            "Optional JSON dict mapping label->center for the nonstable prior (shared sigma set by --nonstable-prior-sigma). "
+            "If provided, these values override/extend the default centers (which are taken from the Totani init f0 for gas/ics/ps/iso when present)."
+        ),
+    )
+    ap.add_argument(
+        "--component-priors",
+        default=None,
+        help=(
+            "Optional JSON dict mapping label -> {center, sigma_dex, mode}. "
+            "mode in {'f','f_upper','f_lower'} where 'f_lower' only penalizes being below center and 'f_upper' only penalizes being above."
         ),
     )
     ap.add_argument(
@@ -883,14 +902,14 @@ def main():
 
     # Prior centers (Totani init values)
     nonstable_centers = {}
-    for key in ("gas", "ics", "ps", "iso"):
+    for key in ("gas", "ics", "ps"):
         if key in labels_l:
             nonstable_centers[key] = float(f0[labels_l.index(key)])
     iso_center = None
-    for key in ("iso", "isotropic"):
-        if key in labels_l:
-            iso_center = float(f0[labels_l.index(key)])
-            break
+    # for key in ("iso", "isotropic"):
+    #     if key in labels_l:
+    #         iso_center = float(f0[labels_l.index(key)])
+    #         break
 
     if bool(args.iso_anchor) and (args.iso_anchor_e2 is not None):
         jiso = None
@@ -965,6 +984,75 @@ def main():
     # ---- Run MCMC
     vprint(2, "\nRunning MCMC...")
     t0 = time.time()
+
+    if args.nonstable_prior_centers is not None:
+        try:
+            extra_centers = json.loads(str(args.nonstable_prior_centers))
+        except Exception as e:
+            raise SystemExit(f"--nonstable-prior-centers must be valid JSON: {repr(e)}")
+        if not isinstance(extra_centers, dict):
+            raise SystemExit("--nonstable-prior-centers must decode to a JSON object/dict")
+        for k, v in extra_centers.items():
+            lk = str(k).lower()
+            if lk in ("iso", "isotropic"):
+                continue
+            nonstable_centers[lk] = float(v)
+
+    component_priors = None
+    if args.component_priors is not None:
+        try:
+            component_priors = json.loads(str(args.component_priors))
+        except Exception as e:
+            raise SystemExit(f"--component-priors must be valid JSON: {repr(e)}")
+        if not isinstance(component_priors, dict):
+            raise SystemExit("--component-priors must decode to a JSON object/dict")
+
+    # Normalize component_priors keys for consistent matching/printing (labels are matched case-insensitively downstream).
+    component_priors_l = None
+    if component_priors is not None:
+        component_priors_l = {str(k).lower(): v for k, v in component_priors.items()}
+
+    if verbosity >= 1:
+        print("\nPriors (per label):")
+        for j, lab in enumerate(labels):
+            lk = str(lab).lower()
+            lo, hi = bnds[j]
+            lo_str = f"{float(lo):.6e}" if np.isfinite(lo) else "-inf"
+            hi_str = f"{float(hi):.6e}" if np.isfinite(hi) else "+inf"
+
+            pieces = [f"bounds=[{lo_str}, {hi_str}]"
+            ]
+
+            if lk in ("iso", "isotropic"):
+                if (args.iso_prior_sigma_dex is not None) and (float(args.iso_prior_sigma_dex) > 0):
+                    ctr = iso_center if (iso_center is not None) else float(f0[j])
+                    pieces.append(
+                        f"iso_log10_ratio_gauss(mode={str(args.iso_prior_mode)}, center={float(ctr):.6e}, sigma_dex={float(args.iso_prior_sigma_dex):.6g})"
+                    )
+
+            if (args.nonstable_prior_sigma is not None) and (float(args.nonstable_prior_sigma) > 0):
+                if (lk not in ("iso", "isotropic")) and (lk in nonstable_centers):
+                    pieces.append(
+                        f"nonstable_log10_ratio_gauss(center={float(nonstable_centers[lk]):.6e}, sigma_dex={float(args.nonstable_prior_sigma):.6g})"
+                    )
+
+            if component_priors is not None:
+                spec = component_priors_l.get(lk, None) if (component_priors_l is not None) else None
+                if isinstance(spec, dict):
+                    if ("center" in spec) and ("sigma_dex" in spec):
+                        try:
+                            ctr = float(spec.get("center"))
+                            sig = float(spec.get("sigma_dex"))
+                            mode = spec.get("mode", "f")
+                            if np.isfinite(ctr) and np.isfinite(sig) and (sig > 0):
+                                pieces.append(
+                                    f"component_log10_ratio_gauss(mode={str(mode)}, center={ctr:.6e}, sigma_dex={sig:.6g})"
+                                )
+                        except Exception:
+                            pass
+
+            print(f"  {lab}: " + " | ".join(pieces))
+
     res = totani_mcmc_fit(
         Cobs=Cobs,
         mu=mu,
@@ -985,6 +1073,7 @@ def main():
         iso_prior_center=iso_center,
         nonstable_prior_sigma_dex=args.nonstable_prior_sigma,
         nonstable_prior_centers=nonstable_centers,
+        component_priors=component_priors_l,
         init_jitter_frac=1e-3,
         progress=bool(args.progress) and (verbosity > 0),
         verbosity=verbosity,

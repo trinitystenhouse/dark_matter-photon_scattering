@@ -1,0 +1,32 @@
+MCMC Fit Results
+Energy bin: k=0, E_ctr=1304.3 MeV (1.304 GeV)
+Components: gas, iso, ps, loopA, loopB, ics, fb_pos, fb_neg, nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno
+MCMC: 64 walkers, 300000 steps, burn=25000, thin=10
+Used emcee: True
+iso init target E^2 dN/dE: 1.000000e-04
+Acceptance fraction: mean=0.377
+Log-likelihood (ML): 19044805.975
+
+Component                                                     ML           p16           p50           p84
+----------------------------------------------------------------------------------------------------
+gas                                                 +2.112375e-01  +2.103667e-01  +2.111744e-01  +2.119819e-01
+iso                                                 +5.520943e+01  +5.521366e+01  +5.523055e+01  +5.526746e+01
+ps                                                  +4.133079e-01  +4.039948e-01  +4.129419e-01  +4.219164e-01
+loopA                                               +1.352822e-07  +1.226012e-06  +4.876447e-06  +1.290909e-05
+loopB                                               +1.860672e-02  +1.830588e-02  +1.856112e-02  +1.881717e-02
+ics                                                 +8.750592e-01  +8.671187e-01  +8.750679e-01  +8.830399e-01
+fb_pos                                              +1.324879e-02  +1.315099e-02  +1.326794e-02  +1.338463e-02
+fb_neg                                              +6.334182e-03  +6.205448e-03  +6.354148e-03  +6.503825e-03
+nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno  +8.246679e-02  +8.125937e-02  +8.247758e-02  +8.369701e-02
+
+[CANCELLATION CHECK] bin k=0:
+  data=2.104e+06  model=2.106e+06  model/data=1
+  sum(pos comps)=2.106e+06  sum(neg comps)=0.000e+00  cancellation frac=1
+  mu_pix min=3.935e-01  median=1.983e+00
+  top components by |counts|:
+    gas                   +1.166e+06
+    ics                   +4.360e+05
+    nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno  +1.570e+05
+    loopB                 +9.120e+04
+    fb_pos                +8.554e+04
+    ps                    +6.716e+04

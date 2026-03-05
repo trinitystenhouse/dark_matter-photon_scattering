@@ -1,0 +1,45 @@
+{
+  "counts": "../../../fermi_data/totani/processed/counts_ccube_1000to1000000.fits",
+  "expo": "../../../fermi_data/totani/processed/expcube_1000to1000000.fits",
+  "templates_dir": "../../../fermi_data/totani/processed/templates",
+  "ext_mask": "../../../fermi_data/totani/processed/templates/mask_extended_sources.fits",
+
+  "roi_lon": 60.0,
+  "roi_lat": 60.0,
+  "disk_cut": 10.0,
+  "cell_deg": 10.0,
+  "binsz": 0.125,
+
+  "nwalkers": 64,
+  "nsteps": 60000,
+  "burn": 15000,
+  "thin": 10,
+
+  "nonstable_prior_sigma": 0.5,
+
+  "iso_target_e2": 0.0001,
+  "iso_anchor": true,
+  "iso_anchor_e2": 0.0001,
+  "iso_floor_e2": 0.000001,
+  "iso_prior_mode": "f_lower",
+  "iso_prior_sigma_dex": 0.1,
+
+  "tighten_negative_bounds": false,
+  "negative_keys": ["nfw", "fb_neg"],
+
+  "component_priors": {
+          "loopA": { "center": 1.0, "sigma_dex": 0.2, "mode": "f_lower" },
+          "loopB": { "center": 1.0, "sigma_dex": 0.2, "mode": "f_lower" }
+  },
+
+  "progress": true,
+  "no_plots": true,
+
+  "early_stop": true,
+  "require_autocorr": true,
+  "autocorr_target": 50.0,
+  "autocorr_check_every": 20000,
+  "autocorr_min_steps": 30000,
+
+  "verbosity": 1
+}

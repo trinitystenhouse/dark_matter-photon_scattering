@@ -1,0 +1,32 @@
+MCMC Fit Results
+Energy bin: k=0, E_ctr=1304.3 MeV (1.304 GeV)
+Components: gas, iso, ps, loopA, loopB, ics, fb_pos, fb_neg, nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno
+MCMC: 64 walkers, 300000 steps, burn=25000, thin=10
+Used emcee: True
+iso init target E^2 dN/dE: 1.000000e-04
+Acceptance fraction: mean=0.377
+Log-likelihood (ML): 19047597.227
+
+Component                                                     ML           p16           p50           p84
+----------------------------------------------------------------------------------------------------
+gas                                                 +2.014802e-01  +2.006080e-01  +2.014158e-01  +2.022234e-01
+iso                                                 +5.520825e+01  +5.521255e+01  +5.522608e+01  +5.525573e+01
+ps                                                  +3.263440e-01  +3.177023e-01  +3.265927e-01  +3.355092e-01
+loopA                                               +1.412743e-07  +9.083010e-07  +3.602239e-06  +9.526746e-06
+loopB                                               +1.646042e-02  +1.617982e-02  +1.643847e-02  +1.669717e-02
+ics                                                 +7.090122e-01  +7.027822e-01  +7.109098e-01  +7.190281e-01
+fb_pos                                              +1.010846e-02  +9.988468e-03  +1.011005e-02  +1.023266e-02
+fb_neg                                              +5.326570e-03  +5.248133e-03  +5.397529e-03  +5.546538e-03
+nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno  +9.840605e-02  +9.721791e-02  +9.819363e-02  +9.916950e-02
+
+[CANCELLATION CHECK] bin k=0:
+  data=2.104e+06  model=2.106e+06  model/data=1
+  sum(pos comps)=2.106e+06  sum(neg comps)=0.000e+00  cancellation frac=1
+  mu_pix min=4.299e-01  median=1.978e+00
+  top components by |counts|:
+    gas                   +1.112e+06
+    ics                   +3.533e+05
+    nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno  +3.449e+05
+    loopB                 +8.068e+04
+    fb_pos                +6.527e+04
+    iso                   +6.232e+04

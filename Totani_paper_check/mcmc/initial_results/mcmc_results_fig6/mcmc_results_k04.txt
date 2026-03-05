@@ -1,0 +1,32 @@
+MCMC Fit Results
+Energy bin: k=4, E_ctr=10926.0 MeV (10.926 GeV)
+Components: gas, iso, ps, loopA, loopB, ics, fb_pos, fb_neg, nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno
+MCMC: 64 walkers, 300000 steps, burn=25000, thin=10
+Used emcee: True
+iso init target E^2 dN/dE: 1.000000e-04
+Acceptance fraction: mean=0.377
+Log-likelihood (ML): 697187.849
+
+Component                                                     ML           p16           p50           p84
+----------------------------------------------------------------------------------------------------
+gas                                                 +1.284333e+00  +1.259514e+00  +1.287667e+00  +1.315837e+00
+iso                                                 +2.968201e+01  +2.969492e+01  +2.974638e+01  +2.986013e+01
+ps                                                  +7.222577e-01  +7.000409e-01  +7.191184e-01  +7.382408e-01
+loopA                                               +1.538445e-06  +1.553766e-05  +6.208576e-05  +1.643106e-04
+loopB                                               +8.882530e-03  +7.623179e-03  +8.864239e-03  +1.010998e-02
+ics                                                 +8.874348e-01  +8.098427e-01  +8.808515e-01  +9.519636e-01
+fb_pos                                              +2.156715e-02  +2.091853e-02  +2.156643e-02  +2.221859e-02
+fb_neg                                              +1.148308e-02  +1.062092e-02  +1.135398e-02  +1.208695e-02
+nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno  +1.370468e-01  +1.331371e-01  +1.378951e-01  +1.426727e-01
+
+[CANCELLATION CHECK] bin k=4:
+  data=1.141e+05  model=1.143e+05  model/data=1
+  sum(pos comps)=1.143e+05  sum(neg comps)=0.000e+00  cancellation frac=1
+  mu_pix min=2.393e-02  median=1.046e-01
+  top components by |counts|:
+    gas                   +4.705e+04
+    nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno  +2.342e+04
+    ics                   +1.171e+04
+    ps                    +1.168e+04
+    iso                   +8.009e+03
+    fb_pos                +6.705e+03

@@ -163,6 +163,7 @@ def totani_mcmc_fit(
     iso_prior_center: Optional[float] = None,
     nonstable_prior_sigma_dex: Optional[float] = None,
     nonstable_prior_centers: Optional[dict] = None,
+    component_priors: Optional[dict] = None,
     init_jitter_frac: float = 1e-2,
     rng: Optional[np.random.Generator] = None,
     progress: bool = False,
@@ -213,6 +214,24 @@ def totani_mcmc_fit(
         z = np.log10(x / x0)
         return -0.5 * (z / float(sigma_dex)) ** 2
 
+    def _log10_ratio_gauss_lower_only(x: float, x0: float, sigma_dex: float) -> float:
+        if (sigma_dex is None) or (sigma_dex <= 0) or (not np.isfinite(sigma_dex)):
+            return 0.0
+        if (not np.isfinite(x)) or (not np.isfinite(x0)) or (x <= 0) or (x0 <= 0):
+            return -np.inf
+        if x >= x0:
+            return 0.0
+        z = np.log10(x / x0)
+        return -0.5 * (z / float(sigma_dex)) ** 2
+
+    def _log10_ratio_gauss_mode(x: float, x0: float, sigma_dex: float, mode: str) -> float:
+        m = str(mode).strip().lower()
+        if m in ("f_upper", "upper", "upper_only"):
+            return _log10_ratio_gauss_upper_only(x, x0, sigma_dex)
+        if m in ("f_lower", "lower", "lower_only"):
+            return _log10_ratio_gauss_lower_only(x, x0, sigma_dex)
+        return _log10_ratio_gauss(x, x0, sigma_dex)
+
     def logprior_gaussian(f: np.ndarray) -> float:
         lp = 0.0
 
@@ -229,6 +248,8 @@ def totani_mcmc_fit(
                 mode = str(iso_prior_mode).strip().lower()
                 if mode in ("f_upper", "upper", "upper_only"):
                     lp_i = _log10_ratio_gauss_upper_only(float(f[jiso]), center, float(iso_prior_sigma_dex))
+                elif mode in ("f_lower", "lower", "lower_only"):
+                    lp_i = _log10_ratio_gauss_lower_only(float(f[jiso]), center, float(iso_prior_sigma_dex))
                 else:
                     lp_i = _log10_ratio_gauss(float(f[jiso]), center, float(iso_prior_sigma_dex))
                 if not np.isfinite(lp_i):
@@ -240,10 +261,44 @@ def totani_mcmc_fit(
             centers = nonstable_prior_centers or {}
             for lab_key, ctr in centers.items():
                 lk = str(lab_key).lower()
+                if lk in ("iso", "isotropic"):
+                    continue
                 if lk not in labels_l:
                     continue
                 j = labels_l.index(lk)
                 lp_j = _log10_ratio_gauss(float(f[j]), float(ctr), float(nonstable_prior_sigma_dex))
+                if not np.isfinite(lp_j):
+                    return -np.inf
+                lp += lp_j
+
+        # General per-component priors (optional): dict(label -> {center, sigma_dex, mode})
+        # This is more flexible than nonstable_prior_* because sigma and mode can vary per label.
+        if component_priors is not None:
+            if not isinstance(component_priors, dict):
+                return -np.inf
+            for lab_key, spec in component_priors.items():
+                lk = str(lab_key).lower()
+                if lk not in labels_l:
+                    continue
+                if spec is None:
+                    continue
+                if not isinstance(spec, dict):
+                    return -np.inf
+
+                sigma = spec.get("sigma_dex", None)
+                if sigma is None:
+                    continue
+                sigma = float(sigma)
+                if (not np.isfinite(sigma)) or (sigma <= 0):
+                    continue
+
+                if "center" not in spec:
+                    continue
+                center = float(spec.get("center"))
+                mode = spec.get("mode", "f")
+
+                j = labels_l.index(lk)
+                lp_j = _log10_ratio_gauss_mode(float(f[j]), center, sigma, str(mode))
                 if not np.isfinite(lp_j):
                     return -np.inf
                 lp += lp_j

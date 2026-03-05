@@ -1,0 +1,32 @@
+MCMC Fit Results
+Energy bin: k=11, E_ctr=450657.0 MeV (450.657 GeV)
+Components: gas, iso, ps, loopA, loopB, ics, fb_pos, fb_neg, nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno
+MCMC: 64 walkers, 300000 steps, burn=25000, thin=10
+Used emcee: True
+iso init target E^2 dN/dE: 1.000000e-04
+Acceptance fraction: mean=0.317
+Log-likelihood (ML): -43.976
+
+Component                                                     ML           p16           p50           p84
+----------------------------------------------------------------------------------------------------
+gas                                                 +1.625229e+00  +8.630569e-01  +1.430000e+00  +2.074056e+00
+iso                                                 +2.068141e+01  +2.072486e+01  +2.098889e+01  +2.156286e+01
+ps                                                  +3.507396e-02  +2.330710e-02  +3.562907e-02  +5.106126e-02
+loopA                                               +4.721600e-05  +6.256328e-04  +2.474264e-03  +6.492877e-03
+loopB                                               +2.438733e-04  +8.355320e-04  +3.300482e-03  +8.619861e-03
+ics                                                 +2.503291e-01  +2.128517e-01  +4.272935e-01  +7.748495e-01
+fb_pos                                              +4.872247e-03  +3.679669e-03  +1.108064e-02  +2.148950e-02
+fb_neg                                              +5.794965e-03  +4.815464e-04  +1.067860e-02  +2.158311e-02
+nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno  +8.932784e-03  -5.425892e-02  -7.721607e-03  +3.649094e-02
+
+[CANCELLATION CHECK] bin k=11:
+  data=2.260e+02  model=2.656e+02  model/data=1.18
+  sum(pos comps)=2.656e+02  sum(neg comps)=0.000e+00  cancellation frac=1
+  mu_pix min=1.330e-04  median=3.031e-04
+  top components by |counts|:
+    iso                   +1.636e+02
+    gas                   +6.411e+01
+    ps                    +1.706e+01
+    ics                   +6.550e+00
+    fb_neg                +4.955e+00
+    nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno  +4.920e+00

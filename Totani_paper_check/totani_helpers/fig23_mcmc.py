@@ -104,6 +104,7 @@ def make_plots_from_mcmc(
     disk_cut: float = 10.0,
     binsz: float = 0.125,
     labels: Optional[Sequence[str]] = None,
+    exclude_disk_in_plot: bool = False,
 ):
     os.makedirs(outdir, exist_ok=True)
 
@@ -199,10 +200,9 @@ def make_plots_from_mcmc(
     else:
         bkg_names = list(templates_counts.keys())
 
-    # Fig2 (include disk)
-    # Fig3 (exclude disk in plot)
-    # All others : fitted w/o disk
-    if fig == "fig3":
+    # Fig3 historically excluded the disk in the *plot* (not necessarily in the fit).
+    # Allow overriding that behavior via exclude_disk_in_plot.
+    if bool(exclude_disk_in_plot) or str(fig) == "fig3":
         plot_mask2d = fit_mask_2d & (np.abs(lat) >= float(disk_cut))
     else:
         plot_mask2d = fit_mask_2d
@@ -234,7 +234,7 @@ def make_plots_from_mcmc(
         curves=curves,
     )
 
-    if fig == "fig3":
+    if bool(exclude_disk_in_plot) or str(fig) == "fig3":
         title = f"MCMC background components ({mcmc_stat}), |b|>={float(disk_cut):g} deg"
     else:
         title = f"MCMC background components ({mcmc_stat})"
