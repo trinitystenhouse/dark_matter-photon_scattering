@@ -139,36 +139,7 @@ def totani_init_from_mu_counts(
             if E2_at_f1 <= 0 or not np.isfinite(E2_at_f1):
                 raise RuntimeError(f"Inferred iso E^2 dN/dE at f=1 is invalid: {E2_at_f1}")
             f0[jiso] = iso_target_E2 / E2_at_f1
-        
-    iso_counts_sum_f1 = mu[jiso].sum()
-    iso_counts_sum_init = f0[jiso] * iso_counts_sum_f1
-    print(f"iso sum counts (f=1):   {iso_counts_sum_f1:.3e}")
-    print(f"iso sum counts (init):  {iso_counts_sum_init:.3e}")
-    print(f"iso implied E2 dN/dE (f=1): {E2I:.3e}")
-    print(f"iso f_init: {f0[jiso]:.3e}")
-
     return f0
-import numpy as np
-from typing import Sequence, Tuple, Optional
-
-def logprior_bounds_inclusive(x: np.ndarray, bounds: Sequence[Tuple[float, float]]) -> float:
-    x = np.asarray(x, float)
-    for j, (lo, hi) in enumerate(bounds):
-        v = x[j]
-        if not np.isfinite(v):
-            return -np.inf
-        if np.isfinite(lo) and (v < lo):
-            return -np.inf
-        if np.isfinite(hi) and (v > hi):
-            return -np.inf
-    return 0.0
-
-
-def loglike_poisson_counts(Cobs: np.ndarray, Cexp: np.ndarray) -> float:
-    # Drop constants (log(y!)); requires Cexp > 0
-    if np.any(~np.isfinite(Cexp)) or np.any(Cexp <= 0):
-        return -np.inf
-    return float(np.sum(Cobs * np.log(Cexp) - Cexp))
 
 
 def totani_mcmc_fit(

@@ -858,27 +858,12 @@ def main():
     )
     denom_vec = denom_cells[cell_keep].astype(float)
 
-    # Rescale isotropic template so that f_iso=1 corresponds to E^2 dN/dE = args.iso_anchor_e2.
-    # This makes the anchored prior center and initialization live near f_iso~1.
+    # Note on isotropic anchoring:
+    # We do NOT rescale the iso template here. Instead, --iso-anchor only sets the isotropic
+    # prior center in E^2 dN/dE-space (converted into f-space for this bin). This keeps
+    # f_iso interpretable as a scale factor on the *input template* (so f_iso_init can be
+    # ~O(10-100) at low energies if mu_iso@f=1 corresponds to a much lower E^2 dN/dE).
     labels_l = [str(x).lower() for x in labels]
-    if bool(args.iso_anchor) and (args.iso_anchor_e2 is not None):
-        jiso = None
-        for key in ("iso", "isotropic"):
-            if key in labels_l:
-                jiso = labels_l.index(key)
-                break
-        if jiso is not None:
-            E2I, _I_med = infer_iso_E2dNdE_at_f1(mu[jiso], denom_vec, Ectr_k)
-            if (not np.isfinite(E2I)) or (E2I <= 0.0):
-                raise RuntimeError(
-                    "Cannot anchor isotropic template in fit: inferred E^2 dN/dE at f=1 is non-finite or non-positive."
-                )
-            scale = float(args.iso_anchor_e2) / float(E2I)
-            mu[jiso] *= float(scale)
-            vprint(
-                2,
-                f"[iso template anchor] E2(f=1)={float(E2I):.6e} target={float(args.iso_anchor_e2):.6e} => mu_iso *= {float(scale):.6e}",
-            )
 
     if verbosity >= 2:
         print("\nTemplate scales (cell space, f=1):")

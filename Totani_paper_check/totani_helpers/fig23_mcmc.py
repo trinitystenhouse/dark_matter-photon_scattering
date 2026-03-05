@@ -229,7 +229,7 @@ def make_plots_from_mcmc(
     curves.append(("total", E2_tot))
 
     _save_curves_txt(
-        out_txt=os.path.join(outdir, f"E2_dnde_background_components_mcmc_{fig}_{mcmc_stat}.txt"),
+        out_txt=os.path.join(outdir, f"mcmc_{fig}_{mcmc_stat}.txt"),
         Ectr_mev=Ectr_mev,
         curves=curves,
     )
@@ -242,7 +242,7 @@ def make_plots_from_mcmc(
     _plot_multi(
         Ectr_mev,
         curves,
-        out_png=os.path.join(outdir, f"E2_dnde_background_components_mcmc_{fig}_{mcmc_stat}.png"),
+        out_png=os.path.join(outdir, f"mcmc_{fig}_{mcmc_stat}.png"),
         title=title,
         plot_style=plot_style,
     )
