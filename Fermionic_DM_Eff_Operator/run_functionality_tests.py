@@ -88,6 +88,11 @@ def main() -> int:
         default=0.01,
         help="Target attenuation depth used to define tau_needed (smoke-test value).",
     )
+    parser.add_argument(
+        "--combined-only",
+        action="store_true",
+        help="If set, only generate/verify the combined tau_grid composite figures (skips per-operator plots).",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -103,102 +108,178 @@ def main() -> int:
 
     results: List[CmdResult] = []
 
-    for op in operators:
-        for ftype in fermion_types:
-            # Majorana forbids dipole operators in this code.
-            if ftype == "majorana" and op in ("dipole_magnetic", "dipole_electric"):
-                continue
+    if not bool(args.combined_only):
+        for op in operators:
+            for ftype in fermion_types:
+                # Majorana forbids dipole operators in this code.
+                if ftype == "majorana" and op in ("dipole_magnetic", "dipole_electric"):
+                    continue
 
-            case_dir = os.path.join(args.outdir, op, ftype)
-            os.makedirs(case_dir, exist_ok=True)
+                case_dir = os.path.join(args.outdir, op, ftype)
+                os.makedirs(case_dir, exist_ok=True)
 
-            # Single-point plot
-            results.append(
-                run_cmd(
-                    f"single_point.{op}.{ftype}",
-                    [
-                        sys.executable,
-                        SCRIPT,
-                        "--operator",
-                        op,
-                        "--fermion-type",
-                        ftype,
-                        "--baseline",
-                        str(args.baseline),
-                        "--Lambda",
-                        "1e3",
-                        "--mchi",
-                        "1.0",
-                        "--c_s",
-                        "4e-2",
-                        "--c_p",
-                        "4e-2",
-                        "--outdir",
-                        case_dir,
-                    ],
+                # Single-point plot
+                results.append(
+                    run_cmd(
+                        f"single_point.{op}.{ftype}",
+                        [
+                            sys.executable,
+                            SCRIPT,
+                            "--operator",
+                            op,
+                            "--fermion-type",
+                            ftype,
+                            "--baseline",
+                            str(args.baseline),
+                            "--Lambda",
+                            "1e3",
+                            "--mchi",
+                            "1.0",
+                            "--c_s",
+                            "4e-2",
+                            "--c_p",
+                            "4e-2",
+                            "--outdir",
+                            case_dir,
+                        ],
+                    )
                 )
-            )
 
-            # Tau-grid band (default)
-            results.append(
-                run_cmd(
-                    f"tau_grid.band.{op}.{ftype}",
-                    [
-                        sys.executable,
-                        SCRIPT,
-                        "--tau-grid",
-                        "--operator",
-                        op,
-                        "--fermion-type",
-                        ftype,
-                        "--baseline",
-                        str(args.baseline),
-                        "--dip-depth",
-                        str(float(args.dip_depth)),
-                        "--tau-grid-n-lambda",
-                        str(int(args.grid_n)),
-                        "--tau-grid-n-mchi",
-                        str(int(args.grid_n)),
-                        "--outdir",
-                        case_dir,
-                    ],
+                # Tau-grid band (default)
+                results.append(
+                    run_cmd(
+                        f"tau_grid.band.{op}.{ftype}",
+                        [
+                            sys.executable,
+                            SCRIPT,
+                            "--tau-grid",
+                            "--operator",
+                            op,
+                            "--fermion-type",
+                            ftype,
+                            "--baseline",
+                            str(args.baseline),
+                            "--dip-depth",
+                            str(float(args.dip_depth)),
+                            "--tau-grid-n-lambda",
+                            str(int(args.grid_n)),
+                            "--tau-grid-n-mchi",
+                            str(int(args.grid_n)),
+                            "--outdir",
+                            case_dir,
+                        ],
+                    )
                 )
-            )
 
-            # Tau-grid legacy dip mode
-            results.append(
-                run_cmd(
-                    f"tau_grid.dip.{op}.{ftype}",
-                    [
-                        sys.executable,
-                        SCRIPT,
-                        "--tau-grid",
-                        "--tau-energy-mode",
-                        "dip",
-                        "--dip-energy",
-                        "175",
-                        "--operator",
-                        op,
-                        "--fermion-type",
-                        ftype,
-                        "--baseline",
-                        str(args.baseline),
-                        "--dip-depth",
-                        str(float(args.dip_depth)),
-                        "--tau-grid-n-lambda",
-                        str(int(args.grid_n)),
-                        "--tau-grid-n-mchi",
-                        str(int(args.grid_n)),
-                        "--outdir",
-                        case_dir,
-                    ],
+                # Tau-grid legacy dip mode
+                results.append(
+                    run_cmd(
+                        f"tau_grid.dip.{op}.{ftype}",
+                        [
+                            sys.executable,
+                            SCRIPT,
+                            "--tau-grid",
+                            "--tau-energy-mode",
+                            "dip",
+                            "--dip-energy",
+                            "175",
+                            "--operator",
+                            op,
+                            "--fermion-type",
+                            ftype,
+                            "--baseline",
+                            str(args.baseline),
+                            "--dip-depth",
+                            str(float(args.dip_depth)),
+                            "--tau-grid-n-lambda",
+                            str(int(args.grid_n)),
+                            "--tau-grid-n-mchi",
+                            str(int(args.grid_n)),
+                            "--outdir",
+                            case_dir,
+                        ],
+                    )
                 )
-            )
 
-            # Verify outputs exist for this case
-            assert_glob(os.path.join(case_dir, "spectrum_with_attenuation_*.png"), min_matches=1)
-            assert_glob(os.path.join(case_dir, f"tau_vs_lambda_{op}_*.png"), min_matches=1)
-            assert_glob(os.path.join(case_dir, f"tau_grid_{op}_*.png"), min_matches=1)
+                # Verify outputs exist for this case
+                assert_glob(os.path.join(case_dir, "spectrum_with_attenuation_*.png"), min_matches=1)
+                assert_glob(os.path.join(case_dir, f"tau_vs_lambda_{op}_*.png"), min_matches=1)
+                assert_glob(os.path.join(case_dir, f"tau_grid_{op}_*.png"), min_matches=1)
+
+    # Combined tau-grid composites (Dirac + Majorana) for beamer
+    results.append(
+        run_cmd(
+            f"combined_tau_grid.band.{str(args.baseline)}",
+            [
+                sys.executable,
+                SCRIPT,
+                "--combined-tau-grid",
+                "--baseline",
+                str(args.baseline),
+                "--dip-depth",
+                str(float(args.dip_depth)),
+                "--tau-grid-n-lambda",
+                str(int(args.grid_n)),
+                "--tau-grid-n-mchi",
+                str(int(args.grid_n)),
+                "--outdir",
+                str(args.outdir),
+            ],
+        )
+    )
+    results.append(
+        run_cmd(
+            f"combined_tau_grid.dip.{str(args.baseline)}",
+            [
+                sys.executable,
+                SCRIPT,
+                "--combined-tau-grid",
+                "--tau-energy-mode",
+                "dip",
+                "--dip-energy",
+                "500",
+                "--baseline",
+                str(args.baseline),
+                "--dip-depth",
+                str(float(args.dip_depth)),
+                "--tau-grid-n-lambda",
+                str(int(args.grid_n)),
+                "--tau-grid-n-mchi",
+                str(int(args.grid_n)),
+                "--outdir",
+                str(args.outdir),
+            ],
+        )
+    )
+
+    assert_glob(
+        os.path.join(
+            str(args.outdir),
+            f"combined_tau_grid_dirac_{str(args.baseline)}.png",
+        ),
+        min_matches=1,
+    )
+    assert_glob(
+        os.path.join(
+            str(args.outdir),
+            f"combined_tau_grid_dirac_{str(args.baseline)}.pdf",
+        ),
+        min_matches=1,
+    )
+    assert_glob(
+        os.path.join(
+            str(args.outdir),
+            f"combined_tau_grid_majorana_{str(args.baseline)}.png",
+        ),
+        min_matches=1,
+    )
+    assert_glob(
+        os.path.join(
+            str(args.outdir),
+            f"combined_tau_grid_majorana_{str(args.baseline)}.pdf",
+        ),
+        min_matches=1,
+    )
 
     for r in results:
         print_result(r)

@@ -3,6 +3,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.path import Path
 from matplotlib.patches import PathPatch
+import matplotlib.image as mpimg
 
 
 def latex_sci(x, sig=2):
@@ -126,12 +127,12 @@ def make_combined_tau_vs_lambda_beamer(
 
     fig.text(
         0.5,
-        0.98,
+        0.995,
         str(header_text),
         ha="center",
         va="top",
         fontsize=10,
-        color="k",
+        color="w",
     )
 
     for i, op in enumerate(operators):
@@ -144,7 +145,7 @@ def make_combined_tau_vs_lambda_beamer(
         tau_max_lambda = np.asarray(tau_max_lambda, dtype=float)
 
         ax.plot(Lambda_grid, tau_max_lambda, lw=2)
-        ax.axhline(float(tau_needed), color="k", ls="--", lw=1)
+        ax.axhline(float(tau_needed), color="w", ls="--", lw=1)
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_title(operator_title(op), fontsize=11)
@@ -160,6 +161,75 @@ def make_combined_tau_vs_lambda_beamer(
         axes[r, c].axis("off")
 
     fig.subplots_adjust(top=0.90, hspace=0.35, wspace=0.25)
+
+    fig.savefig(str(out_base) + ".png", dpi=200)
+    fig.savefig(str(out_base) + ".pdf")
+    plt.close(fig)
+
+
+def make_combined_tau_grid_png_beamer(
+    *,
+    operators,
+    png_paths,
+    out_base,
+    header_text,
+    ncols=3,
+):
+    operators = [str(o) for o in operators]
+    png_paths = [str(p) for p in png_paths]
+    if len(operators) != len(png_paths):
+        raise ValueError("operators and png_paths must have the same length")
+
+    nops = int(len(operators))
+    if nops <= 0:
+        raise ValueError("operators must be a non-empty list")
+
+    ncols = int(max(1, ncols))
+    nrows = int(np.ceil(float(nops) / float(ncols)))
+
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(12.0, 3.1 * float(nrows)),
+        constrained_layout=False,
+    )
+    axes = np.atleast_1d(axes).reshape(nrows, ncols)
+
+    # --- header ---
+    fig.text(
+        0.5,
+        0.972,            # lower than 0.995 -> less wasted space above header
+        str(header_text),
+        ha="center",
+        va="top",
+        fontsize=10,
+        color="w",
+    )
+
+    # --- spacing ---
+    fig.subplots_adjust(
+        left=0.06,
+        right=0.99,
+        bottom=0.10,
+        top=0.90,         # increase (e.g. 0.92–0.94) to bring plots closer to header
+        hspace=0.15,      # smaller -> subplots closer vertically
+        wspace=0.10,      # smaller -> subplots closer horizontally
+    )
+
+    for i, (op, p) in enumerate(zip(operators, png_paths)):
+        r = int(i // ncols)
+        c = int(i % ncols)
+        ax = axes[r, c]
+
+        img = mpimg.imread(p)
+        ax.imshow(img)
+        ax.set_title(operator_title(op), fontsize=11, pad=6, color="w")
+        ax.axis("off")
+
+    for j in range(nops, nrows * ncols):
+        r = int(j // ncols)
+        c = int(j % ncols)
+        axes[r, c].axis("off")
 
     fig.savefig(str(out_base) + ".png", dpi=200)
     fig.savefig(str(out_base) + ".pdf")

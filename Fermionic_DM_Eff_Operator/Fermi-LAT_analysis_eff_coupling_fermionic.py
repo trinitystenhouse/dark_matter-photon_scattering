@@ -9,6 +9,7 @@ from helpers.fermi_plotting import (
     add_hatched_region_from_contour,
     operator_title,
     make_combined_tau_vs_lambda_beamer,
+    make_combined_tau_grid_png_beamer,
 )
 from scipy.optimize import curve_fit
 from scipy.stats import qmc
@@ -571,7 +572,10 @@ def plot_tau_grid(
             borderaxespad=0.0,
         )
 
-    out_grid = os.path.join(outdir, f"tau_grid_{str(operator)}_{str(baseline)}.png")
+    out_grid = os.path.join(
+        outdir,
+        f"tau_grid_{str(operator)}_{str(fermion_type)}_{str(baseline)}.png",
+    )
     figG.tight_layout()
     plt.savefig(out_grid)
     plt.close(figG)
@@ -1011,7 +1015,7 @@ def main():
     parser.add_argument(
         "--dip-energy",
         type=float,
-        default=175.0,
+        default=500.0,
         help="Energy (GeV) where you want a visible attenuation (used by --find-visible).",
     )
     parser.add_argument(
@@ -1057,6 +1061,11 @@ def main():
         "--combined-limits",
         action="store_true",
         help="If set, make beamer-ready combined multi-panel tau_vs_lambda plots over operators.",
+    )
+    parser.add_argument(
+        "--combined-tau-grid",
+        action="store_true",
+        help="If set, make beamer-ready combined multi-panel tau_grid figures over operators (Dirac and Majorana separately).",
     )
     parser.add_argument(
         "--tau-energy-mode",
@@ -1266,13 +1275,10 @@ def main():
 
         header_text = "  ".join(
             [
-                rf"baseline={str(baseline)}",
                 rf"$\rho_\chi={latex_sci(RHO_CHI_SETTING)}\,\mathrm{{GeV/cm^3}}$",
                 rf"$L={latex_sci(L_SETTING)}\,\mathrm{{cm}}$",
                 rf"$f_\mathrm{{EFT}}={float(args.eft_kinematic_factor):g}$",
                 rf"$\tau_\mathrm{{needed}}={latex_sci(tau_needed)}$",
-                rf"dip\ depth={float(dip_depth):g}",
-                rf"{str(tau_energy_label)}",
             ]
         )
 
@@ -1310,6 +1316,99 @@ def main():
                 n_mchi=int(getattr(args, "tau_grid_n_mchi")),
                 outdir=str(args.outdir),
                 header_text=str(header_text),
+            )
+
+        return
+
+    if bool(args.combined_tau_grid):
+        tau_mode = str(getattr(args, "tau_energy_mode", "band"))
+        if tau_mode == "dip":
+            E_eval = np.asarray([float(args.dip_energy)], dtype=float)
+            tau_energy_label = rf"$E={float(args.dip_energy):g}\,\mathrm{{GeV}}$"
+        else:
+            Emin = float(args.tau_energy_min) if args.tau_energy_min is not None else float(np.min(E_data))
+            Emax = float(args.tau_energy_max) if args.tau_energy_max is not None else float(np.max(E_data))
+            if Emin <= 0.0 or Emax <= 0.0 or Emin >= Emax:
+                raise ValueError(f"Invalid tau energy band: Emin={Emin}, Emax={Emax} (need 0 < Emin < Emax).")
+            nE = int(max(2, getattr(args, "tau_energy_n", 60)))
+            E_eval = np.logspace(np.log10(Emin), np.log10(Emax), nE)
+            tau_energy_label = rf"$\max_{{E\in[{Emin:g},{Emax:g}]\,\mathrm{{GeV}}}}$"
+
+        header_text = "  ".join(
+            [
+                rf"baseline={str(baseline)}",
+                rf"$\rho_\chi={latex_sci(RHO_CHI_SETTING)}\,\mathrm{{GeV/cm^3}}$",
+                rf"$L={latex_sci(L_SETTING)}\,\mathrm{{cm}}$",
+                rf"$f_\mathrm{{EFT}}={float(args.eft_kinematic_factor):g}$",
+                rf"$\tau_\mathrm{{needed}}={latex_sci(tau_needed)}$",
+                rf"dip\ depth={float(dip_depth):g}",
+                rf"{str(tau_energy_label)}",
+            ]
+        )
+
+        operators = [
+            "rayleigh_even",
+            "rayleigh_odd",
+            "rayleigh_full",
+            "dipole_magnetic",
+            "dipole_electric",
+            "charge_radius",
+            "anapole",
+        ]
+
+        for ft in ["dirac", "majorana"]:
+            ops_ft = list(operators)
+            if str(ft) == "majorana":
+                ops_ft = [o for o in ops_ft if o not in ["dipole_magnetic", "dipole_electric"]]
+
+            png_paths = []
+            for op in ops_ft:
+                grid = compute_max_tau_grid(
+                    E_eval=np.asarray(E_eval, dtype=float),
+                    rho_chi=float(RHO_CHI_SETTING),
+                    L_cm=float(L_SETTING),
+                    omega_max_for_validity=float(np.max(E_data)),
+                    eft_kinematic_factor=float(args.eft_kinematic_factor),
+                    log10_Lambda_min=float(getattr(args, "log10_Lambda_min")),
+                    log10_Lambda_max=float(getattr(args, "log10_Lambda_max")),
+                    log10_mchi_min=float(args.log10_mchi_min),
+                    log10_mchi_max=float(args.log10_mchi_max),
+                    n_Lambda=int(getattr(args, "tau_grid_n_lambda")),
+                    n_mchi=int(getattr(args, "tau_grid_n_mchi")),
+                    operator=str(op),
+                    fermion_type=str(ft),
+                )
+
+                plot_tau_grid(
+                    Lambda_grid=grid["Lambda_grid"],
+                    mchi_grid=grid["mchi_grid"],
+                    tau_grid=grid["tau_grid"],
+                    eft_valid_grid=grid["eft_valid_grid"],
+                    tau_needed=float(tau_needed),
+                    tau_energy_label=str(tau_energy_label),
+                    outdir=str(args.outdir),
+                    operator=str(op),
+                    fermion_type=str(ft),
+                    baseline=str(baseline),
+                    meta_text=None,
+                )
+
+                png_paths.append(
+                    os.path.join(
+                        str(args.outdir),
+                        f"tau_grid_{str(op)}_{str(ft)}_{str(baseline)}.png",
+                    )
+                )
+
+            make_combined_tau_grid_png_beamer(
+                operators=ops_ft,
+                png_paths=png_paths,
+                out_base=os.path.join(
+                    str(args.outdir),
+                    f"combined_tau_grid_{str(ft)}_{str(baseline)}",
+                ),
+                header_text=str(header_text),
+                ncols=3,
             )
 
         return
