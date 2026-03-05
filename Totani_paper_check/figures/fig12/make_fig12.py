@@ -22,10 +22,7 @@ from totani_helpers.totani_io import (  # noqa: E402
     read_exposure,
     resample_exposure_logE,
 )
-from totani_helpers.cellwise_fit import (
-    fit_cellwise_poisson_mle_counts,
-    per_bin_total_counts_from_cellwise_coeffs,
-)
+
 from totani_helpers.fit_utils import build_fit_mask3d
 from totani_helpers.mcmc_io import combine_loopI, load_mcmc_coeffs_by_label
 
@@ -638,6 +635,105 @@ def plot_raw_counts(Ectr_gev, C, Cerr, outpath, title):
     print("✓ wrote", outpath)
 
 
+def plot_halo_plus_residual_bins0to3(
+    *,
+    counts,
+    expo,
+    omega,
+    dE_mev,
+    coeffs_halo,
+    templates_dir,
+    wcs,
+    roi2d,
+    disk_keep,
+    ext_keep3d,
+    sigma_smooth_deg,
+    binsz_deg,
+    out_png,
+    vlims_by_bin,
+    Ectr_gev,
+):
+    nE, ny, nx = counts.shape
+    disk_band_2d = (roi2d & (~disk_keep))
+
+    maps = []
+    extmasks = []
+    for k in range(4):
+        if k >= nE:
+            raise ValueError(f"Requested bin {k} but only have nE={nE}")
+        model_nonhalo_halo_k = _build_nonhalo_model_map_k(
+            k=int(k),
+            coeffs_by_label=coeffs_halo,
+            templates_dir=templates_dir,
+            nE=nE,
+            ny=ny,
+            nx=nx,
+        )
+        halo_plus_resid_counts = np.asarray(counts[int(k)], float) - np.asarray(model_nonhalo_halo_k, float)
+        m = counts_to_flux(halo_plus_resid_counts, expo[int(k)], omega, dE_mev[int(k)])
+        m = smooth_map_deg(m, float(sigma_smooth_deg), float(binsz_deg))
+
+        extmask2d = (roi2d & disk_keep & (~np.asarray(ext_keep3d[int(k)], dtype=bool)))
+        m[np.asarray(extmask2d, dtype=bool)] = np.nan
+
+        maps.append(m)
+        extmasks.append(extmask2d)
+
+    cmap = LinearSegmentedColormap.from_list(
+        "cyan_blue_black_orange_yellow",
+        ["cyan", "blue", "black", "orangered", "yellow"],
+        N=256,
+    ).copy()
+    cmap.set_bad(color="0.6")
+
+    disk_overlay = np.where(np.asarray(disk_band_2d, dtype=bool), 1.0, np.nan)
+
+    fig = plt.figure(figsize=(10.5, 9.0), constrained_layout=True)
+    axes = np.array(
+        [
+            [fig.add_subplot(2, 2, 1, projection=wcs), fig.add_subplot(2, 2, 2, projection=wcs)],
+            [fig.add_subplot(2, 2, 3, projection=wcs), fig.add_subplot(2, 2, 4, projection=wcs)],
+        ]
+    )
+
+    def draw(ax, img, k):
+        vlim = float(vlims_by_bin[int(k)])
+        norm = TwoSlopeNorm(vmin=-vlim, vcenter=0.0, vmax=vlim)
+        im = ax.imshow(img, origin="lower", cmap=cmap, norm=norm, interpolation="nearest")
+        ax.imshow(
+            disk_overlay,
+            origin="lower",
+            cmap="gray",
+            vmin=0.0,
+            vmax=1.0,
+            alpha=0.85,
+            interpolation="nearest",
+        )
+        ax.text(
+            0.03,
+            0.93,
+            rf"bin {int(k)} ({Ectr_gev[int(k)]:.2f} GeV) halo+residual",
+            transform=ax.transAxes,
+            color="white",
+            fontsize=10,
+            ha="left",
+            va="top",
+        )
+        ax.set_xlabel("Galactic longitude")
+        ax.set_ylabel("Galactic latitude")
+        cbar = plt.colorbar(im, ax=ax, orientation="horizontal", pad=0.08, fraction=0.06, location="top")
+        cbar.set_label(r"flux  [cm$^{-2}$ s$^{-1}$ sr$^{-1}$ MeV$^{-1}$]")
+
+    draw(axes[0, 0], maps[0], 0)
+    draw(axes[0, 1], maps[1], 1)
+    draw(axes[1, 0], maps[2], 2)
+    draw(axes[1, 1], maps[3], 3)
+
+    fig.savefig(out_png, dpi=250)
+    plt.close(fig)
+    print("✓ wrote", out_png)
+
+
 def plot_fit_fig2(Ectr_gev, data_y, data_yerr, comp_specs, outpath, title):
     fig = plt.figure(figsize=(7.2, 5.2))
     ax = fig.add_subplot(111)
@@ -658,271 +754,6 @@ def plot_fit_fig2(Ectr_gev, data_y, data_yerr, comp_specs, outpath, title):
     fig.savefig(outpath, dpi=200)
     plt.close(fig)
     print("✓ wrote", outpath)
-
-
-# -------------------------
-# Main
-# -------------------------
-def main():
-    import argparse
-    ap = argparse.ArgumentParser(description="Make BOTH: raw counts plot + Totani Fig2-style fitted component plot.")
-    ap.add_argument(
-        "--counts",
-        default=os.path.join(DATA_DIR, "processed", "counts_ccube_1000to1000000.fits"),
-        help="counts_ccube_*.fits",
-    )
-    ap.add_argument(
-        "--expo",
-        default=os.path.join(DATA_DIR, "processed", "expcube_1000to1000000.fits"),
-        help="expcube_*.fits",
-    )
-    ap.add_argument(
-        "--templates-dir",
-        default=os.path.join(DATA_DIR, "processed", "templates"),
-        help="directory containing templates (mu_*_counts.fits etc)",
-    )
-    ap.add_argument(
-        "--outdir",
-        default=os.path.join(os.path.dirname(__file__), "plots_fig2_3"),
-    )
-    ap.add_argument("--binsz", type=float, default=0.125)
-
-    ap.add_argument("--roi-lon", type=float, default=60.0)
-    ap.add_argument("--roi-lat", type=float, default=60.0)
-    ap.add_argument("--cell-deg", type=float, default=10.0)
-    ap.add_argument(
-        "--weighting",
-        default="uniform",
-        choices=["uniform", "poisson"],
-        help="pixel weighting scheme inside each fit cell",
-    )
-    ap.add_argument(
-        "--cell-normalize",
-        action="store_true",
-        help="normalize each template column to sum=1 within each (cell, energy) before NNLS (old behavior)",
-    )
-    ap.add_argument("--disk-cut-fit", type=float, default=10.0, help="disk cut |b|>=X applied ONLY in fit plot")
-    ap.add_argument("--mask-fit", default=None, help="optional mask FITS for fit plot (2D or 3D), True=keep")
-
-    args = ap.parse_args()
-    os.makedirs(args.outdir, exist_ok=True)
-
-    mcmc_dir_nohalo = args.mcmc_dir_nohalo or args.mcmc_dir
-    mcmc_dir_halo = args.mcmc_dir_halo or args.mcmc_dir
-    if (mcmc_dir_nohalo is None) or (mcmc_dir_halo is None):
-        raise SystemExit("Provide either --mcmc-dir (for both) or both --mcmc-dir-nohalo and --mcmc-dir-halo")
-
-    # Load counts + EBOUNDS
-    counts, hdr, Emin, Emax, Ectr_mev, dE_mev = read_counts_and_ebounds(args.counts)
-    nE, ny, nx = counts.shape
-    wcs = WCS(hdr).celestial
-
-    # Exposure
-    expo_raw, E_expo_mev = read_exposure(args.expo)
-    if expo_raw.shape[1:] != (ny, nx):
-        raise RuntimeError(f"Exposure grid {expo_raw.shape[1:]} != counts grid {(ny, nx)}")
-    expo = resample_exposure_logE(expo_raw, E_expo_mev, Ectr_mev)
-    if expo.shape[0] != nE:
-        raise RuntimeError("Exposure resampling did not produce same nE as counts")
-
-    # Solid angle map
-    omega = pixel_solid_angle_map(wcs, ny, nx, args.binsz)
-
-    # Lon/lat and ROI box
-    lon, lat = lonlat_grids(wcs, ny, nx)
-    roi2d = build_roi_box_mask(lon, lat, args.roi_lon, args.roi_lat)
-
-    # X axis in GeV (IMPORTANT)
-    Ectr_gev = Ectr_mev / 1000.0
-
-    # -------------------------
-    # (A) Raw counts UNMASKED plot
-    # "unmasked" here = ROI box only (no disk cut, no source mask)
-    # -------------------------
-    mask3d_raw = roi2d[None, :, :] & np.ones((nE, ny, nx), bool)
-    C_raw, C_raw_err = raw_counts_spectrum(counts, mask3d_raw)
-
-    out_counts = os.path.join(args.outdir, "raw_counts_unmasked_roi.png")
-    plot_raw_counts(
-        Ectr_gev, C_raw, C_raw_err, out_counts,
-        title=rf"Raw counts per bin (ROI: |l|≤{args.roi_lon}°, |b|≤{args.roi_lat}°; no disk/source mask)"
-    )
-
-    # Optional source/extended mask (True=keep)
-    if args.mask_fit is not None:
-        srcmask = load_mask_any_shape(args.mask_fit, nE, ny, nx)
-    else:
-        srcmask = np.ones((nE, ny, nx), bool)
-
-    # Resolve templates automatically
-    tpl = resolve_templates(args.templates_dir)
-
-    print("[templates] dir:", args.templates_dir)
-    for k in ["GAS", "ICS", "ISO", "PS", "LOOPI", "FB_FLAT", "BUB_POS", "BUB_NEG", "NFW"]:
-        if k in tpl:
-            print(f"[templates] {k}: {tpl[k]}")
-            
-    # Load templates
-    labels = ["gas", "iso", "ps", "nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno", "loopI", "ics", "fb_flat"]
-
-    mu_list, headers = load_mu_templates_from_fits(
-        template_dir=args.templates_dir,
-        labels=labels,
-        filename_pattern="mu_{label}_counts.fits",  
-        hdu=0,
-    )
-
-    assert_templates_match_counts(counts, mu_list, labels)
-
-
-    def run_fit_and_plot(
-        region_name,
-        region2d,
-        out_png,
-        out_coeff_txt,
-        cells,
-        coeff_cells,
-        counts,
-        expo,
-        omega,
-        dE_mev,
-        Ectr_mev,
-        Ectr_gev,
-        srcmask,
-        mu_list,
-        labels,
-    ):
-        """
-        region2d: boolean keep-mask (ny,nx)
-        Uses mask3d_plot = srcmask (3d) AND region2d (2d) for spectra + output sums.
-        Assumes mu_list are TRUE COUNTS templates and coeff_cells multiply them directly.
-        """
-
-        # Final 3D mask for THIS region
-        mask3d_plot = srcmask & region2d[None, :, :]
-
-        # Data E^2 spectrum in this region
-        E2_data, E2err_data = data_E2_spectrum_counts(
-            counts=counts,
-            expo=expo,
-            omega=omega,
-            dE_mev=dE_mev,
-            Ectr_mev=Ectr_mev,
-            mask3d=mask3d_plot,
-        )
-
-        # Model/component E^2 spectra in this region (from fitted cell coefficients)
-        E2_comp, E2_model = model_E2_spectrum_from_cells_counts(
-            coeff_cells=coeff_cells,
-            cells=cells,
-            templates=mu_list,   # TRUE counts templates
-            expo=expo,
-            omega=omega,
-            dE_mev=dE_mev,
-            Ectr_mev=Ectr_mev,
-            mask3d=mask3d_plot,
-        )
-
-        # Pack for plotting
-        comp_specs = {lab: E2_comp[j] for j, lab in enumerate(labels)}
-        comp_specs["MODEL_SUM"] = E2_model
-
-        # Closure printout: (data - model)/data in each bin
-        frac_resid = np.full_like(E2_data, np.nan, dtype=float)
-        for k in range(len(E2_data)):
-            if np.isfinite(E2_data[k]) and E2_data[k] != 0 and np.isfinite(E2_model[k]):
-                frac_resid[k] = (E2_data[k] - E2_model[k]) / E2_data[k]
-
-        print("[closure]", region_name)
-        for k in range(len(E2_data)):
-            if np.isfinite(frac_resid[k]):
-                print(f"  k={k:02d} E={Ectr_gev[k]:.3g} GeV frac_resid={(100*frac_resid[k]):+.2f}%")
-
-        # Plot (uses your plot_fit_fig2)
-        plot_fit_fig2(
-            Ectr_gev=Ectr_gev,
-            data_y=E2_data,
-            data_yerr=E2err_data,
-            comp_specs=comp_specs,
-            outpath=out_png,
-            title=region_name,
-        )
-
-        # Save per-bin total COUNTS attributed to each component within this region
-        nE = counts.shape[0]
-        with open(out_coeff_txt, "w") as f:
-            f.write("# k  Ectr(GeV)  " + "  ".join(labels) + "\n")
-            for k in range(nE):
-                csum = np.zeros(len(labels), float)
-
-                for ci, cell2d in enumerate(cells):
-                    cm = mask3d_plot[k] & cell2d
-                    if not np.any(cm):
-                        continue
-
-                    a = coeff_cells[ci, k, :]  # (nComp,)
-                    if not np.all(np.isfinite(a)):
-                        continue
-
-                    for j in range(len(labels)):
-                        s = float(np.nansum(mu_list[j][k][cm]))  # template counts in (cell ∩ region)
-                        if np.isfinite(s) and s != 0.0:
-                            csum[j] += float(a[j]) * s
-
-                f.write(
-                    f"{k:02d} {Ectr_gev[k]:.6g} " +
-                    " ".join(f"{csum[j]:.6g}" for j in range(len(labels))) +
-                    "\n"
-                )
-
-        print("✓ wrote", out_coeff_txt)
-
-    # Define regions
-    disk_cut = float(args.disk_cut_fit)
-    fig2_region2d = roi2d                              # Fig 2: include disk
-    fig3_region2d = roi2d & (np.abs(lat) >= disk_cut)  # Fig 3: exclude disk
-
-    # Fit mask is the SAME for both figures: ROI including disk
-    fit_mask3d = build_fit_mask3d(
-        roi2d=roi2d,
-        srcmask3d=srcmask,
-        counts=counts,
-        expo=expo,
-    )
-
-    cells, coeff_cells, info = fit_per_bin_poisson_mle_cellwise_counts(
-        counts=counts,
-        templates=mu_list,      # your list of count templates
-        mask3d=fit_mask3d,
-        lon=lon, lat=lat,
-        roi_lon=args.roi_lon, roi_lat=args.roi_lat,
-        cell_deg=10.0,
-        nonneg=True,
-    )
-
-
-    # Fig 2 outputs
-    out_fig2 = os.path.join(args.outdir, "totani_fig11_nohalo_fit_components.png")
-    out_c2   = os.path.join(args.outdir, "fit_coefficients_fig11_nohalo.txt")
-
-    run_fit_and_plot(
-        region_name=rf"|l|≤{args.roi_lon}°\n|b|≤{args.roi_lat}°",
-        region2d=roi2d,
-        out_png=out_fig2,
-        out_coeff_txt=out_c2,
-        cells=cells,
-        coeff_cells=coeff_cells,
-        counts=counts,
-        expo=expo,
-        omega=omega,
-        dE_mev=dE_mev,
-        Ectr_mev=Ectr_mev,
-        Ectr_gev=Ectr_gev,
-        srcmask=srcmask,
-        mu_list=mu_list,
-        labels=labels,
-    )
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -950,7 +781,7 @@ def main():
     )
     ap.add_argument(
         "--outdir",
-        default=os.path.join(os.path.dirname(__file__), "plots_fig11"),
+        default=os.path.join(os.path.dirname(__file__), "plots_fig12"),
     )
 
     ap.add_argument("--binsz", type=float, default=0.125)
@@ -985,7 +816,7 @@ def main():
     )
     ap.add_argument(
         "--halo-label",
-        default="nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno",
+        default="nfw_NFW_g1_rho2_rs21_R08_rvir402_ns2048_normpole_pheno",
         help="Halo component key in the with-halo MCMC outputs.",
     )
     ap.add_argument(
@@ -1042,9 +873,9 @@ def main():
 
     templates_dir = args.templates_dir
 
-    tab_nohalo = load_mcmc_coeffs_by_label(mcmc_dir=str(mcmc_dir_nohalo), stat=str(args.mcmc_stat), nE=nE)
+    tab_nohalo = load_mcmc_coeffs_by_label(mcmc_dir=str(args.mcmc_dir_nohalo), stat=str(args.mcmc_stat), nE=nE)
     coeffs_nohalo = dict(tab_nohalo.coeffs_by_label)
-    tab_halo = load_mcmc_coeffs_by_label(mcmc_dir=str(mcmc_dir_halo), stat=str(args.mcmc_stat), nE=nE)
+    tab_halo = load_mcmc_coeffs_by_label(mcmc_dir=str(args.mcmc_dir_halo), stat=str(args.mcmc_stat), nE=nE)
     coeffs_halo = dict(tab_halo.coeffs_by_label)
 
     if bool(args.combine_loopI):
@@ -1114,6 +945,26 @@ def main():
         energy_label=f"{Ectr_gev[k]:.2f} GeV",
     )
 
+    out_png_fig12 = os.path.join(args.outdir, "totani_fig12_halo_plus_residual_bins0to3.png")
+    vlims_by_bin = {0: 4e-10, 1: 1e-10, 2: 3e-11, 3: 5e-12}
+    plot_halo_plus_residual_bins0to3(
+        counts=counts,
+        expo=expo,
+        omega=omega,
+        dE_mev=dE_mev,
+        coeffs_halo=coeffs_halo,
+        templates_dir=templates_dir,
+        wcs=wcs,
+        roi2d=roi2d,
+        disk_keep=disk_keep,
+        ext_keep3d=ext_keep3d,
+        sigma_smooth_deg=float(args.smoothing_deg),
+        binsz_deg=float(args.binsz),
+        out_png=out_png_fig12,
+        vlims_by_bin=vlims_by_bin,
+        Ectr_gev=Ectr_gev,
+    )
+
     halo_coeffs_all = np.asarray(coeffs_halo[str(halo_label_used)], float).reshape(-1)
 
     def _stack_plot(ks, tag, label):
@@ -1149,7 +1000,7 @@ def main():
                 halo_sum += ak * np.asarray(halo_mu[kk], float)
 
         extmask_stack = (roi2d & disk_keep) & (~np.all(ext_keep3d[ks], axis=0))
-        out_png_stack = os.path.join(args.outdir, f"totani_fig11_like_{tag}_E{Ectr_gev[k]:.2f}GeV.png")
+        out_png_stack = os.path.join(args.outdir, f"totani_fig12_like_{tag}_E{Ectr_gev[k]:.2f}GeV.png")
         if tag == "below":
             vlim_stack = 1e-10
         elif tag == "above":

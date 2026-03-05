@@ -516,7 +516,7 @@ def main():
     ap.add_argument(
         "--iso-floor-e2",
         type=float,
-        default=1e-4,
+        default=0.0,
         help=(
             "Isotropic floor in E^2 dN/dE [MeV cm^-2 s^-1 sr^-1]. Converted per energy bin to a lower bound on f_iso. "
             "Set <=0 to disable."

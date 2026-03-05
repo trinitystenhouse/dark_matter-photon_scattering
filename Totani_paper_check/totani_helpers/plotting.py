@@ -146,6 +146,7 @@ def plot_E2_dnde_multi_totani(
     ax.set_yscale("log")
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
+    ax.set_ylim(5e-6, 0.03)
     if title is not None:
         ax.set_title(title)
     if legend:
