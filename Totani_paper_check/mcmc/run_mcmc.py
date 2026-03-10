@@ -1012,6 +1012,32 @@ def main():
     if component_priors is not None:
         component_priors_l = {str(k).lower(): v for k, v in component_priors.items()}
 
+    # Convert any component priors specified in E2-space (center_e2) into f-space centers for this energy bin.
+    component_priors_f = None
+    component_prior_center_e2 = {}
+    if component_priors_l is not None:
+        component_priors_f = {}
+        for lab_key, spec in component_priors_l.items():
+            if not isinstance(spec, dict):
+                component_priors_f[lab_key] = spec
+                continue
+
+            spec_f = dict(spec)
+            if "center_e2" in spec_f:
+                try:
+                    center_e2 = float(spec_f.get("center_e2"))
+                    if np.isfinite(center_e2) and (center_e2 > 0) and (lab_key in labels_l):
+                        j = labels_l.index(lab_key)
+                        E2_f1, _I_med = infer_iso_E2dNdE_at_f1(mu[j], denom_vec, Ectr_k)
+                        if (not np.isfinite(E2_f1)) or (E2_f1 <= 0):
+                            raise RuntimeError("E2(f=1) is non-finite or non-positive")
+                        spec_f["center"] = float(center_e2) / float(E2_f1)
+                        component_prior_center_e2[lab_key] = float(center_e2)
+                except Exception as e:
+                    raise SystemExit(f"Invalid component_priors[{lab_key}].center_e2 conversion: {repr(e)}")
+
+            component_priors_f[lab_key] = spec_f
+
     if verbosity >= 1:
         print("\nPriors (per label):")
         for j, lab in enumerate(labels):
@@ -1037,7 +1063,7 @@ def main():
                     )
 
             if component_priors is not None:
-                spec = component_priors_l.get(lk, None) if (component_priors_l is not None) else None
+                spec = component_priors_f.get(lk, None) if (component_priors_f is not None) else None
                 if isinstance(spec, dict):
                     if ("center" in spec) and ("sigma_dex" in spec):
                         try:
@@ -1045,9 +1071,14 @@ def main():
                             sig = float(spec.get("sigma_dex"))
                             mode = spec.get("mode", "f")
                             if np.isfinite(ctr) and np.isfinite(sig) and (sig > 0):
-                                pieces.append(
-                                    f"component_log10_ratio_gauss(mode={str(mode)}, center={ctr:.6e}, sigma_dex={sig:.6g})"
-                                )
+                                if lk in component_prior_center_e2:
+                                    pieces.append(
+                                        f"component_log10_ratio_gauss(mode={str(mode)}, center_e2={float(component_prior_center_e2[lk]):.6e}, center_f={ctr:.6e}, sigma_dex={sig:.6g})"
+                                    )
+                                else:
+                                    pieces.append(
+                                        f"component_log10_ratio_gauss(mode={str(mode)}, center={ctr:.6e}, sigma_dex={sig:.6g})"
+                                    )
                         except Exception:
                             pass
 
@@ -1073,7 +1104,7 @@ def main():
         iso_prior_center=iso_center,
         nonstable_prior_sigma_dex=args.nonstable_prior_sigma,
         nonstable_prior_centers=nonstable_centers,
-        component_priors=component_priors_l,
+        component_priors=component_priors_f,
         init_jitter_frac=1e-3,
         progress=bool(args.progress) and (verbosity > 0),
         verbosity=verbosity,

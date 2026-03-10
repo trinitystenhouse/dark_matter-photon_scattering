@@ -15,23 +15,17 @@
   "burn": 50000,
   "thin": 10,
 
+  "iso_target_e2": 0.0001,
   "iso_anchor": true,
   "iso_anchor_e2": 0.0001,
   "iso_prior_mode": "f_lower",
   "iso_prior_sigma_dex": 0.05,
 
-  "tighten_negative_bounds": true,
+  "tighten_negative_bounds": false,
   "negative_keys": ["nfw", "fb_neg"],
 
   "progress": true,
   "no_plots": true,
-
-  "component_priors": {
-    "loopI": { "center_e2": 1e-3, "sigma_dex": 0.2, "mode": "f" },
-    "nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno": { "center_e2": 1e-5, "sigma_dex": 0.5, "mode": "f_upper" }
-  },
-
-  "nonstable_prior_sigma": 0.5,
 
   "early_stop": true,
   "require_autocorr": true,
@@ -39,5 +33,5 @@
   "autocorr_check_every": 20000,
   "autocorr_min_steps": 30000,
 
-  "verbosity": 2
+  "verbosity": 1
 }

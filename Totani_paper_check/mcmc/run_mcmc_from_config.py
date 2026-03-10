@@ -101,6 +101,19 @@ def _print_prior_summary(*, cfg: Dict[str, Any], base_argv: Optional[Sequence[st
     nonstable_centers = cfg.get("nonstable_prior_centers", {})
     component_priors = cfg.get("component_priors", {})
 
+    negative_keys = cfg.get("negative_keys", ["nfw", "fb_neg"])
+    if not isinstance(negative_keys, list):
+        negative_keys = [str(negative_keys)]
+    negative_keys_l = [str(x).lower() for x in negative_keys]
+
+    component_priors_l = None
+    if isinstance(component_priors, dict):
+        component_priors_l = {str(k).lower(): v for k, v in component_priors.items()}
+
+    nonstable_centers_l = None
+    if isinstance(nonstable_centers, dict):
+        nonstable_centers_l = {str(k).lower(): v for k, v in nonstable_centers.items()}
+
     extra_keys: List[str] = []
     if isinstance(nonstable_centers, dict):
         extra_keys.extend([str(k) for k in nonstable_centers.keys()])
@@ -129,6 +142,12 @@ def _print_prior_summary(*, cfg: Dict[str, Any], base_argv: Optional[Sequence[st
             lk = str(lab).lower()
             pieces: List[str] = []
 
+            # Bounds always apply (flat prior)
+            if any(nk in lk for nk in negative_keys_l):
+                pieces.append("bounds=flat(-inf,+inf)")
+            else:
+                pieces.append("bounds=flat([0,+inf])")
+
             if lk in ("iso", "isotropic"):
                 if "iso_prior_sigma_dex" in cfg:
                     pieces.append(
@@ -136,24 +155,42 @@ def _print_prior_summary(*, cfg: Dict[str, Any], base_argv: Optional[Sequence[st
                     )
                 if cfg.get("iso_anchor", None) is not None:
                     pieces.append(f"iso_anchor={bool(cfg.get('iso_anchor'))} (center depends on energy bin)")
+                if cfg.get("iso_floor_e2", None) is not None:
+                    try:
+                        floor = float(cfg.get("iso_floor_e2"))
+                        if floor > 0:
+                            pieces.append(f"iso_floor_e2={floor:.6g} (=> f_iso lower bound depends on energy bin)")
+                    except Exception:
+                        pass
 
             if cfg.get("nonstable_prior_sigma", None) is not None:
                 # nonstable never applies to iso (enforced in mcmc_helper.py)
-                if (lk not in ("iso", "isotropic")) and isinstance(nonstable_centers, dict) and (lk in [str(k).lower() for k in nonstable_centers.keys()]):
-                    pieces.append(f"nonstable_log10_ratio_gauss(sigma_dex={cfg.get('nonstable_prior_sigma')})")
+                if lk not in ("iso", "isotropic"):
+                    # If explicit centers provided in config, apply to those keys.
+                    if (nonstable_centers_l is not None) and (lk in nonstable_centers_l):
+                        pieces.append(
+                            f"nonstable_log10_ratio_gauss(center={nonstable_centers_l.get(lk)}, sigma_dex={cfg.get('nonstable_prior_sigma')})"
+                        )
+                    else:
+                        # Otherwise, run_mcmc.py defaults to applying this to gas/ics/ps (if present) centered on Totani init f0.
+                        if lk in ("gas", "ics", "ps"):
+                            pieces.append(
+                                f"nonstable_log10_ratio_gauss(center=TotaniInit(f0), sigma_dex={cfg.get('nonstable_prior_sigma')})"
+                            )
 
             if isinstance(component_priors, dict):
-                spec = component_priors.get(lab, None)
-                if spec is None:
-                    spec = component_priors.get(lk, None)
+                spec = None
+                if component_priors_l is not None:
+                    spec = component_priors_l.get(lk, None)
                 if isinstance(spec, dict):
-                    if ("center" in spec) and ("sigma_dex" in spec):
+                    if ("center_e2" in spec) and ("sigma_dex" in spec):
+                        pieces.append(
+                            f"component_log10_ratio_gauss(mode={spec.get('mode','f')}, center_e2={spec.get('center_e2')} (converted per bin), sigma_dex={spec.get('sigma_dex')})"
+                        )
+                    elif ("center" in spec) and ("sigma_dex" in spec):
                         pieces.append(
                             f"component_log10_ratio_gauss(mode={spec.get('mode','f')}, center={spec.get('center')}, sigma_dex={spec.get('sigma_dex')})"
                         )
-
-            if not pieces:
-                pieces.append("(none specified here; bounds always apply, plus defaults inside run_mcmc.py)")
             print(f"  {lab}: " + " | ".join(pieces))
 
 
