@@ -21,13 +21,21 @@ from totani_helpers.totani_io import (  # noqa: E402
     read_exposure,
     resample_exposure_logE,
 )
-from totani_helpers.fit_utils import E2_from_pred_counts_maps, build_fit_mask3d  # noqa: E402
-from totani_helpers.mcmc_io import combine_loopI, load_mcmc_coeffs_by_label, pick_coeff
-
-from fig2_3.make_totani_fig2_fig3_all import (  # noqa: E402
-    assert_templates_match_counts,
+from totani_helpers.fit_utils import (  # noqa: E402
+    E2_from_pred_counts_maps,
+    build_fit_mask3d,
     load_mu_templates_from_fits,
 )
+from totani_helpers.mcmc_io import combine_loopI, load_mcmc_coeffs_by_label, pick_coeff
+
+
+def _assert_templates_match_counts(counts: np.ndarray, mu_list: list[np.ndarray], labels: list[str]) -> None:
+    if not isinstance(mu_list, (list, tuple)) or len(mu_list) != len(labels):
+        raise ValueError("mu_list must align with labels")
+    for lab, mu in zip(labels, mu_list):
+        mu = np.asarray(mu)
+        if mu.shape != counts.shape:
+            raise ValueError(f"Template '{lab}' has shape {mu.shape}, expected counts shape {counts.shape}")
 
 
 REPO_DIR = os.environ.get(
@@ -60,17 +68,17 @@ def main():
 
     ap.add_argument(
         "--mcmc-dir-rho25",
-        default=os.path.join(REPO_DIR, "Totani_paper_check", "mcmc", "mcmc_results_rho2p5"),
+        default=os.path.join(REPO_DIR, "Totani_paper_check", "mcmc", "mcmc_results_fig5"),
         help="MCMC directory for rho=2.5 variant (mcmc_results_kXX.npz files).",
     )
     ap.add_argument(
         "--mcmc-dir-rho2",
-        default=os.path.join(REPO_DIR, "Totani_paper_check", "mcmc", "mcmc_results_rho2"),
+        default=os.path.join(REPO_DIR, "Totani_paper_check", "mcmc", "mcmc_results_fig6"),
         help="MCMC directory for rho=2 variant (mcmc_results_kXX.npz files).",
     )
     ap.add_argument(
         "--mcmc-dir-rho1",
-        default=os.path.join(REPO_DIR, "Totani_paper_check", "mcmc", "mcmc_results"),
+        default=os.path.join(REPO_DIR, "Totani_paper_check", "mcmc", "mcmc_results_fig7"),
         help="MCMC directory for rho=1 variant (mcmc_results_kXX.npz files).",
     )
     ap.add_argument(
@@ -170,7 +178,7 @@ def main():
             filename_pattern="mu_{label}_counts.fits",
             hdu=0,
         )
-        assert_templates_match_counts(counts, mu_list, labels_load)
+        _assert_templates_match_counts(counts, mu_list, labels_load)
 
         tab = load_mcmc_coeffs_by_label(mcmc_dir=str(mcmc_dir), stat=str(args.mcmc_stat), nE=nE)
         coeffs_plot = combine_loopI(coeffs_by_label=dict(tab.coeffs_by_label), out_key="loopI", drop_inputs=False)

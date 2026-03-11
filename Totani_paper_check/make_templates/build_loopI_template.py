@@ -97,16 +97,9 @@ def main():
     ap.add_argument("--binsz", type=float, default=0.125)
     ap.add_argument("--roi-lon", type=float, default=60.0)
     ap.add_argument("--roi-lat", type=float, default=60.0)
-
-    ap.add_argument(
-        "--iso-target-e2",
-        type=float,
-        default=1e-4,
-        help="Reference E^2 dN/dE [MeV cm^-2 s^-1 sr^-1] used to set f=1 normalization.",
-    )
     ap.add_argument(
         "--rescale-to-data-sum",
-        default=True,
+        default=False,
         action=argparse.BooleanOptionalAction,
         help="After building mu, rescale each energy plane so sum(mu)=sum(data) within ROI/data mask.",
     )
@@ -264,10 +257,7 @@ def main():
     # --- PHENO (Totani-style): energy-independent morphology replicated ---
     Tcube = np.broadcast_to(T_norm[None, :, :], (nE, ny, nx)).astype(float).copy()
 
-    iso_target_E2 = float(args.iso_target_e2)
-    Iref_mev = iso_target_E2 / (np.asarray(Ectr_mev, float) ** 2)
-
-    loopI_dnde = Iref_mev[:, None, None] * Tcube
+    loopI_dnde = Tcube
     loopI_E2dnde = loopI_dnde * (np.asarray(Ectr_mev, float)[:, None, None] ** 2)
     conv = expo * omega[None, :, :] * dE_mev[:, None, None]
     if conv.shape != (nE, ny, nx) or conv.ndim != 3:
@@ -295,7 +285,7 @@ def main():
 
         Tn = T_in / np.mean(vals_in)
         Tn_cube = np.broadcast_to(Tn[None, :, :], (nE, ny, nx)).astype(float).copy()
-        dnde = Iref_mev[:, None, None] * Tn_cube
+        dnde = Tn_cube
         e2 = dnde * (np.asarray(Ectr_mev, float)[:, None, None] ** 2)
         mu = dnde * conv
         if mu.shape != (nE, ny, nx):
@@ -374,7 +364,6 @@ def main():
     out_mu_B = os.path.join(args.outdir, "mu_loopB_counts.fits")
 
     hdr_out = hdr.copy()
-    hdr_out["ISOE2"] = (float(iso_target_E2), "Reference E^2 dN/dE for f=1 [MeV cm-2 s-1 sr-1]")
     hdr_out["RESCLSUM"] = (bool(args.rescale_to_data_sum), "Rescaled each bin to match data sum in fit mask")
 
     write_primary_with_bunit(

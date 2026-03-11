@@ -54,11 +54,11 @@ def main():
     )
     ap.add_argument(
         "--pion",
-        default=os.path.join(DATA_DIR, "templates", "pion_decay_mapcube_54_0f770002.gz"),
+        default=os.path.join(DATA_DIR, "templates", "pion_decay_mapcube_54_0f770003.gz"),
     )
     ap.add_argument(
         "--bremss",
-        default=os.path.join(DATA_DIR, "templates", "bremss_mapcube_54_0f770002.gz"),
+        default=os.path.join(DATA_DIR, "templates", "bremss_mapcube_54_0f770003.gz"),
     )
     ap.add_argument(
         "--outdir",

@@ -215,7 +215,7 @@ def main():
     )
     ap.add_argument(
         "--rescale-to-data-sum",
-        default=True,
+        default=False,
         action=argparse.BooleanOptionalAction,
         help="After building mu, rescale each energy plane so sum(mu)=sum(data) within ROI/srcmask/data coverage.",
     )
@@ -349,7 +349,7 @@ def main():
         base_component_order=labels,
         roi2d=roi2d,
         srcmask2d=src_keep_2d,
-        boundary2d=boundary2d,
+        boundary2d=None,
         lat_deg_2d=lat2d,
         disk_cut_deg=float(args.disk_cut_deg),
         k_bins_for_bubbles=k_bins,
@@ -371,7 +371,10 @@ def main():
     _save_mask_fits(pos_out, pos_mask.astype(np.uint8), hdr)
     _save_mask_fits(neg_out, neg_mask.astype(np.uint8), hdr)
 
-    flat_mask = (np.asarray(pos_mask, bool) | np.asarray(neg_mask, bool))
+    if boundary2d is None:
+        flat_mask = (np.asarray(pos_mask, bool) | np.asarray(neg_mask, bool))
+    else:
+        flat_mask = np.asarray(boundary2d, bool)
     flat_out = os.path.join(args.out_dir, "fb_flat_mask.fits")
     _save_mask_fits(flat_out, flat_mask.astype(np.uint8), hdr)
 

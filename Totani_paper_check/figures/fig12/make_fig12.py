@@ -829,6 +829,7 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
 
     counts, hdr, _Emin_mev, _Emax_mev, Ectr_mev, dE_mev = read_counts_and_ebounds(args.counts)
+    print(_Emin_mev, _Emax_mev)
     nE, ny, nx = counts.shape
     wcs = WCS(hdr).celestial
     Ectr_gev = Ectr_mev / 1000.0

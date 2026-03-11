@@ -217,7 +217,7 @@ def main():
     )
     ap.add_argument(
         "--rescale-to-data-sum",
-        default=True,
+        default=False,
         action=argparse.BooleanOptionalAction,
         help="After building mu, rescale each energy plane so sum(mu)=sum(data) within the ROI/data mask.",
     )
@@ -333,9 +333,10 @@ def main():
     if np.any(data_ok2d):
         max_abs_lat_cov = float(np.nanmax(np.abs(lat[data_ok2d])))
         print(f"max |lat| with valid data coverage: {max_abs_lat_cov:.2f} deg")
-        if max_abs_lat_cov < 55.0:
+        lat_warn = max(0.0, float(args.roi_lat) - 2.0 * float(args.binsz))
+        if max_abs_lat_cov < lat_warn:
             print(
-                "WARNING: data coverage does not extend to |b|>=55 deg; "
+                f"WARNING: data coverage does not extend to |b|>={lat_warn:.2f} deg; "
                 "high-latitude discrimination between NFW rho^1, rho^2, and rho^2.5 templates "
                 "will be degraded relative to Totani (2025)."
             )
@@ -367,35 +368,19 @@ def main():
                 f"rhos={args.rhos}, rs_kpc={args.rs_kpc}, R0_kpc={args.R0_kpc}, rvir_kpc={args.rvir_kpc}, gamma={args.gamma})."
             )
 
-    # Optional: pole-like normalisation using a latitude band on the actual pixel grid.
-    # This keeps the template spatial-only while allowing a configurable "pole" latitude.
+    # Pole normalization is defined at b=+90 deg (analytic J_pole) to match Totani's convention.
+    # Do not approximate it by averaging over a latitude band on the pixel grid.
     if args.norm in ("pole", "pole+roi-sum", "ref-point"):
-        pole_lat = float(args.pole_lat)
-        pole_lat_eff = max(0.0, min(90.0, pole_lat - float(args.binsz)))
-        pole2d = data_ok2d & (np.abs(lat) >= pole_lat_eff)
-        pole_vals = J[pole2d]
-        pole_vals = pole_vals[np.isfinite(pole_vals) & (pole_vals > 0)]
-        if pole_vals.size == 0:
-            # If data coverage does not extend to the requested pole band (common if |b|max < pole_lat),
-            # fall back to the *analytic* Jpole at b=+90 deg. This preserves Totani's pole convention.
-            vabs = np.abs(lat[data_ok2d])
-            max_cov = float(np.nanmax(vabs)) if np.any(np.isfinite(vabs)) else np.nan
-            print(
-                f"WARNING: pole normalization band empty for |b|>={pole_lat_eff:.2f} deg (max coverage |b|~{max_cov:.2f} deg). "
-                "Falling back to analytic Jpole at b=90 deg."
-            )
-            Jpole = pole_normalization_value(
-                rho_power=args.rho_power,
-                gamma=args.gamma,
-                rs_kpc=args.rs_kpc,
-                rhos=args.rhos,
-                R0_kpc=args.R0_kpc,
-                rvir_kpc=args.rvir_kpc,
-                n_s=max(4096, args.n_s),
-                smax_kpc=args.smax_kpc,
-            )
-        else:
-            Jpole = float(np.mean(pole_vals))
+        Jpole = pole_normalization_value(
+            rho_power=args.rho_power,
+            gamma=args.gamma,
+            rs_kpc=args.rs_kpc,
+            rhos=args.rhos,
+            R0_kpc=args.R0_kpc,
+            rvir_kpc=args.rvir_kpc,
+            n_s=max(4096, args.n_s),
+            smax_kpc=args.smax_kpc,
+        )
         if (not np.isfinite(Jpole)) or (Jpole <= 0.0):
             raise RuntimeError("Pole normalization factor is non-positive or non-finite.")
 
@@ -448,24 +433,16 @@ def main():
     # Now apply ROI mask and normalize to mean=1 within ROI for fitter stability.
     J[~roi] = 0.0
 
-    # For fitting stability: normalise spatial template to mean=1 within ROI
-    vals = J[roi]
-    vals = vals[np.isfinite(vals) & (vals > 0)]
-    if vals.size == 0:
-        raise RuntimeError("NFW template is zero in ROI after masking.")
-    mroi = float(np.mean(vals))
-    if (not np.isfinite(mroi)) or (mroi == 0.0):
-        raise RuntimeError("NFW ROI mean is invalid; cannot normalize.")
-    J = J / mroi
-    norm_fact_total *= float(mroi)
-
     nfw_spatial = J.astype(np.float64)
 
     # Solid angle map
     omega = pixel_solid_angle_map(wcs, ny, nx, args.binsz)
-    # Pole pixel is not exactly b=90 in your ROI grid, so sample a small cap
-    pole_cap = roi & (lat > 59.0)  # or > 55, depending on ROI
-    print("mean J in pole cap:", np.mean(J[pole_cap]))
+    # Pole pixel is not exactly b=90 in the ROI grid; report a data-driven high-latitude cap.
+    cap_lat = min(float(args.roi_lat), float(max_abs_lat_cov)) - 2.0 * float(args.binsz)
+    if np.isfinite(cap_lat) and (cap_lat > 0.0):
+        pole_cap = roi & (np.abs(lat) >= cap_lat)
+        if np.any(pole_cap):
+            print(f"mean J in |b|>={cap_lat:.3f} deg cap:", float(np.mean(J[pole_cap])))
 
 
     def _template_scale_report(*, k: int, data2d: np.ndarray, mu2d: np.ndarray, mask2d: np.ndarray, label: str):

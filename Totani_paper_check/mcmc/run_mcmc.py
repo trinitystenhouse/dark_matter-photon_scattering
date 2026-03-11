@@ -492,7 +492,7 @@ def main():
     ap.add_argument(
         "--negative-keys",
         nargs="+",
-        default=None,
+        default=["nfw", "fb_neg"],
         help=(
             "Substrings that identify components allowed to go negative. "
             "Default is ['nfw', 'fb_neg'] (applied as substring matches)."
@@ -503,7 +503,7 @@ def main():
     ap.add_argument(
         "--iso-anchor-e2",
         type=float,
-        default=1e-4,
+        default=None,
         help=(
             "Anchor the isotropic prior center to this E^2 dN/dE value [MeV cm^-2 s^-1 sr^-1] by converting "
             "to the corresponding f_iso for each energy bin."
@@ -511,7 +511,7 @@ def main():
     )
     ap.add_argument(
         "--iso-anchor",
-        default=True,
+        default=False,
         action=argparse.BooleanOptionalAction,
         help="Enable/disable anchoring the isotropic prior center to --iso-anchor-e2 (default: enabled).",
     )
@@ -527,7 +527,7 @@ def main():
     ap.add_argument(
         "--iso-prior-sigma-dex",
         type=float,
-        default=0.5,
+        default=None,
         help="Gaussian prior on log10(f_iso / f_iso0) with this sigma (dex). Set to 0 to disable.",
     )
     ap.add_argument(
@@ -612,7 +612,7 @@ def main():
     )
     ap.add_argument(
         "--tighten-negative-bounds",
-        default=True,
+        default=False,
         action=argparse.BooleanOptionalAction,
         help=(
             "Tighten negative lower bounds for any component allowed to go negative "
@@ -945,9 +945,7 @@ def main():
             vprint(1, f"[iso floor] E2(f=1)={E2I:.6e}  floor={float(args.iso_floor_e2):.6e}  => f_iso>={float(f_floor):.6e}")
 
     tighten_negative_bounds = bool(args.tighten_negative_bounds)
-    if args.tighten_halo_neg_bound is not None:
-        tighten_negative_bounds = bool(args.tighten_halo_neg_bound)
-
+    
     if tighten_negative_bounds:
         neg_idxs = []
         for j, lab in enumerate(labels):
