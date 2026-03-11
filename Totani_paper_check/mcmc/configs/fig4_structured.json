@@ -1,0 +1,20 @@
+{
+  "base_config": "base.json",
+  "name": "fig4",
+  "mcmc_dir": "../mcmc_results_fig4",
+  "include_disk": false,
+  "energy_bins": "all",
+  "plot_configs": [
+    "../../figures/configs/fig4.json"
+  ],
+  "labels": [
+    "gas",
+    "iso",
+    "ps",
+    "loopA",
+    "loopB",
+    "ics",
+    "fb_neg",
+    "fb_pos"
+  ]
+}

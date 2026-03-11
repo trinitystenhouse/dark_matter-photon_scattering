@@ -1,0 +1,56 @@
+{
+  "Egev_requested": 21.0,
+  "Egev_selected": 18.58791903965422,
+  "counts": "/Users/trinitystenhouse/Documents/PhD/Year 2/DM_Photon_Scattering/fermi_data/totani/processed/counts_ccube_1000to1000000.fits",
+  "disk_cut": 10.0,
+  "ext_mask": "/Users/trinitystenhouse/Documents/PhD/Year 2/DM_Photon_Scattering/fermi_data/totani/processed/templates/mask_extended_sources.fits",
+  "git_hash": "9d3cbeb3e42434a0d59528c43165b6ab41e625b7",
+  "halo_label": "nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno",
+  "inputs": [
+    {
+      "name": "gas",
+      "path": "/Users/trinitystenhouse/Documents/PhD/Year 2/DM_Photon_Scattering/fermi_data/totani/processed/templates/mu_gas_counts.fits"
+    },
+    {
+      "name": "ps",
+      "path": "/Users/trinitystenhouse/Documents/PhD/Year 2/DM_Photon_Scattering/fermi_data/totani/processed/templates/mu_ps_counts.fits"
+    },
+    {
+      "name": "ics",
+      "path": "/Users/trinitystenhouse/Documents/PhD/Year 2/DM_Photon_Scattering/fermi_data/totani/processed/templates/mu_ics_counts.fits"
+    },
+    {
+      "name": "iso",
+      "path": "/Users/trinitystenhouse/Documents/PhD/Year 2/DM_Photon_Scattering/fermi_data/totani/processed/templates/mu_iso_counts.fits"
+    },
+    {
+      "name": "loopA",
+      "path": "/Users/trinitystenhouse/Documents/PhD/Year 2/DM_Photon_Scattering/fermi_data/totani/processed/templates/mu_loopA_counts.fits"
+    },
+    {
+      "name": "loopB",
+      "path": "/Users/trinitystenhouse/Documents/PhD/Year 2/DM_Photon_Scattering/fermi_data/totani/processed/templates/mu_loopB_counts.fits"
+    },
+    {
+      "name": "loopI",
+      "path": "/Users/trinitystenhouse/Documents/PhD/Year 2/DM_Photon_Scattering/fermi_data/totani/processed/templates/mu_loopI_counts.fits"
+    },
+    {
+      "name": "fb_pos",
+      "path": "/Users/trinitystenhouse/Documents/PhD/Year 2/DM_Photon_Scattering/fermi_data/totani/processed/templates/mu_fb_pos_counts.fits"
+    },
+    {
+      "name": "fb_neg",
+      "path": "/Users/trinitystenhouse/Documents/PhD/Year 2/DM_Photon_Scattering/fermi_data/totani/processed/templates/mu_fb_neg_counts.fits"
+    },
+    {
+      "name": "halo",
+      "path": "/Users/trinitystenhouse/Documents/PhD/Year 2/DM_Photon_Scattering/fermi_data/totani/processed/templates/mu_nfw_NFW_g1_rho2.5_rs21_R08_rvir402_ns2048_normpole_pheno_counts.fits"
+    }
+  ],
+  "k_selected": 5,
+  "mask2d_npix": 760070,
+  "roi_lat": 60.0,
+  "roi_lon": 60.0,
+  "templates_dir": "/Users/trinitystenhouse/Documents/PhD/Year 2/DM_Photon_Scattering/fermi_data/totani/processed/templates"
+}
