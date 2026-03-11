@@ -1,3 +1,26 @@
+"""
+Fitting utilities for multi-component gamma-ray template analysis.
+
+This module provides likelihood functions, optimization routines, and masking
+utilities for fitting gamma-ray emission templates to Fermi-LAT data.
+
+Key Functions
+-------------
+poisson_loglike : Poisson log-likelihood for template fitting
+fit_templates_nnls : Non-negative least squares template fitting
+build_fit_mask3d : Construct 3D masks for spatial/energy selections
+cellwise_fit : Perform pixel-by-pixel template fits
+
+The fitting approach uses Poisson statistics appropriate for photon counting
+data, with optional regularization and masking of extended sources.
+
+Notes
+-----
+All fitting functions assume templates and data are in units of counts [ph]
+per pixel per energy bin. Exposure corrections should be applied during
+template construction.
+"""
+
 import numpy as np
 from typing import Dict, Tuple, Union
 from scipy.optimize import nnls

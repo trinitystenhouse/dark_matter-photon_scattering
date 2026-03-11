@@ -1,3 +1,27 @@
+"""
+Spatial cell-by-cell template fitting utilities.
+
+This module provides functions for performing template fits on spatial cells
+(e.g., 5° × 5° regions) rather than globally. This allows for spatially varying
+component normalizations and residual analysis.
+
+Key Functions
+-------------
+build_lonlat_cells : Divide sky into spatial cells
+fit_templates_cellwise : Fit templates independently in each cell
+poisson_loglike_cell : Poisson likelihood for single cell
+
+Cell-by-cell fitting is useful for:
+- Detecting spatial variations in component normalizations
+- Identifying regions with poor model fits
+- Validating global template assumptions
+
+Notes
+-----
+Each cell is fitted independently with the same set of templates. Results
+can be combined to create spatial maps of fitted coefficients.
+"""
+
 import numpy as np
 from scipy.optimize import minimize, nnls
 
@@ -22,13 +46,6 @@ def build_lonlat_cells(*, lon, lat, roi_lon, roi_lat, cell_deg):
                 cells.append(cell)
     return cells
 
-
-import numpy as np
-from scipy.optimize import minimize, nnls
-
-
-import numpy as np
-from scipy.optimize import minimize, nnls
 
 def fit_cellwise_poisson_mle_counts(
     *,

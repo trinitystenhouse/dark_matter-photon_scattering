@@ -1,4 +1,10 @@
-fermi_data
+# Ignore all fermi_data
+fermi_data/
+
+# But don't ignore totani/templates
+!fermi_data/totani/
+!fermi_data/totani/templates/
+!fermi_data/totani/templates/**
 .windsurf
 papers
 test_plots
@@ -17,4 +23,8 @@ Totani_paper_check/figures/fig*/plots*
 Totani_paper_check/mcmc/mcmc_results*
 */__pycache__/*
 */mcmc_coefficients*.txt
-*/plots_*
+
+Fermionic_DM_Eff_Operator/_*
+Fermionic_DM_Eff_Operator/plots
+Scalar_DM_Eff_Operator/_*
+Scalar_DM_Eff_Operator/plots

@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-#!/usr/bin/env bash
-
 set -uo pipefail
 
 if [[ -n "${BASH_SOURCE-}" ]]; then

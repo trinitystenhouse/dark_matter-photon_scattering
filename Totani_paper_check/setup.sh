@@ -45,8 +45,6 @@ fi
 
 if [[ -f "${REPO_ROOT}/requirements_analysis.txt" ]]; then
   echo "Installing dependencies from requirements_analysis.txt..."
-  echo "Ensuring numpy<2.0 for astropy compatibility..."
-  python -m pip install "numpy<2.0" || echo "WARNING: Failed to pin numpy<2.0"
   python -m pip install -r "${REPO_ROOT}/requirements_analysis.txt" || echo "WARNING: Some dependencies failed to install"
 fi
 
