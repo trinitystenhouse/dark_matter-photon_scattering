@@ -1,0 +1,22 @@
+{
+  "fig": "fig4",
+  "plot_style": "totani",
+  "mcmc_stat": "f_ml",
+  "mcmc_dir": "../../mcmc/mcmc_results_fig4",
+  "outdir": "../fig4/plots_fig4",
+  "roi_lon": 60.0,
+  "roi_lat": 60.0,
+  "disk_cut": 10.0,
+  "binsz": 0.125,
+  "exclude_disk_in_plot": true,
+  "labels": [
+    "gas",
+    "iso",
+    "ps",
+    "loopA",
+    "loopB",
+    "ics",
+    "fb_neg",
+    "fb_pos"
+  ]
+}

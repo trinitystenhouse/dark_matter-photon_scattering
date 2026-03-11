@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "totani-paper-check"
+version = "0.1.0"
+description = "Independent validation of Fermi-LAT analysis from Totani (2025)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Trinity Stenhouse", email = "your.email@institution.edu"},
+]
+keywords = ["fermi-lat", "gamma-ray", "dark-matter", "astrophysics", "mcmc"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+
+dependencies = [
+    "numpy>=1.20,<2.0",
+    "scipy>=1.7",
+    "matplotlib>=3.5",
+    "astropy>=5.0",
+    "healpy>=1.15",
+    "emcee>=3.0",
+    "corner>=2.2",
+    "tqdm>=4.60",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=3.0",
+    "black>=22.0",
+    "flake8>=4.0",
+    "mypy>=0.950",
+]
+
+[project.urls]
+Homepage = "https://github.com/trinitystenhouse/DM_Photon_Scattering"
+Documentation = "https://github.com/trinitystenhouse/DM_Photon_Scattering/tree/main/Totani_paper_check"
+Repository = "https://github.com/trinitystenhouse/DM_Photon_Scattering"
+
+[tool.setuptools]
+packages = ["totani_helpers"]
+
+[tool.setuptools.package-data]
+totani_helpers = ["py.typed"]
+
+[tool.black]
+line-length = 100
+target-version = ['py310', 'py311']
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"

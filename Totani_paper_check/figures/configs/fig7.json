@@ -1,0 +1,23 @@
+{
+  "fig": "fig7",
+  "plot_style": "totani",
+  "mcmc_stat": "f_ml",
+  "mcmc_dir": "../../mcmc/mcmc_results_fig5",
+  "outdir": "../fig5_6_7/plots_fig7",
+  "roi_lon": 60.0,
+  "roi_lat": 60.0,
+  "disk_cut": 10.0,
+  "binsz": 0.125,
+  "exclude_disk_in_plot": true,
+  "labels": [
+    "gas",
+    "iso",
+    "ps",
+    "loopA",
+    "loopB",
+    "ics",
+    "nfw_NFW_g1_rho1_rs21_R08_rvir402_ns2048_normpole_pheno",
+    "fb_pos",
+    "fb_neg"
+  ]
+}
