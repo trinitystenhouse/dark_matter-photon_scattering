@@ -90,7 +90,7 @@ def main():
 
     ap.add_argument(
         "--mcmc-dir",
-        default=os.path.join(repo_dir, "Totani_paper_check", "mcmc", "mcmc_results"),
+        default=os.path.join(repo_dir, "Totani_paper_check", "mcmc", "mcmc_results_fig2_3"),
         help="Directory containing mcmc_results_kXX.npz files.",
     )
     ap.add_argument(
@@ -242,7 +242,7 @@ def main():
             vmin = -vmax
 
         im = ax.imshow(bubble_flux_smooth_k, origin="lower", cmap="coolwarm", vmin=vmin, vmax=vmax)
-        ax.set_title(f"Best-fit bubble image (flux), smoothed $\\sigma$=1$^\\circ$\nE={Ectr[k]:.3g} GeV (k={k})")
+        ax.set_title(f"Best-fit bubble image (flux), smoothed $\\sigma$=1$^\\circ$\nE={Ectr[k]/1000:.3g} GeV (k={k})")
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
         if fb_mask2d is not None:
