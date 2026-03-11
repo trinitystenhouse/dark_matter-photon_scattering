@@ -1,3 +1,27 @@
+"""
+MCMC-specific utilities for Figures 2-3 spectral analysis.
+
+This module provides specialized functions for processing MCMC results and
+generating energy spectrum plots that reproduce Figures 2 and 3 from Totani (2025).
+
+Key Functions
+-------------
+_build_counts_cubes_from_coeffs : Reconstruct component counts from MCMC coefficients
+compute_E2_dnde_from_mcmc : Convert MCMC coefficients to E² dN/dE spectra
+make_plots_from_mcmc : Generate publication-quality spectral plots
+
+The workflow:
+1. Load MCMC coefficients from output files
+2. Reconstruct counts cubes for each component
+3. Convert to physical flux units (E² dN/dE)
+4. Plot with Totani (2025) styling
+
+Notes
+-----
+This module assumes MCMC output files contain coefficient tables with
+standard component names (gas, ics, ps, iso, nfw, loopI, fb_pos, fb_neg).
+"""
+
 import os
 from typing import Dict, List, Optional, Sequence, Tuple
 

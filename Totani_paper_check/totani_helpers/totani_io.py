@@ -1,3 +1,23 @@
+"""
+I/O utilities for Fermi-LAT data products and emission templates.
+
+This module provides functions for reading and processing Fermi-LAT data cubes,
+exposure maps, and emission templates used in the Totani (2025) validation analysis.
+
+Key Functions
+-------------
+read_counts_and_ebounds : Load counts cube and energy bin definitions
+read_mapcube_primary : Read 3D sky maps from FITS files
+read_exposure_cube : Load exposure maps
+load_all_templates : Load complete set of emission templates
+get_totani_roi : Define region of interest for analysis
+
+Notes
+-----
+All functions expect FITS files in the standard Fermi-LAT format with
+appropriate WCS headers and EBOUNDS extensions where applicable.
+"""
+
 import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS

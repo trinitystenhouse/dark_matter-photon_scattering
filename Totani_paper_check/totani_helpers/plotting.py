@@ -1,3 +1,19 @@
+"""
+Plotting utilities with Totani (2025) styling conventions.
+
+This module provides plotting functions and style definitions for creating
+publication-quality figures that match the visual style of Totani (2025).
+
+Key Functions
+-------------
+plot_E2_dnde_multi_totani : Plot energy spectra for multiple components
+totani_component_style : Get color/linestyle for a given component
+_norm_key : Normalize component labels to standard names
+
+The module defines consistent colors, line styles, and markers for each
+gamma-ray emission component (gas, ICS, point sources, NFW, Loop I, bubbles).
+"""
+
 import numpy as np
 
 

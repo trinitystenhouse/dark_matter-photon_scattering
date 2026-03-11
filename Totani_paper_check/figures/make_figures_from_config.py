@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from totani_helpers.fig23_mcmc import make_plots_from_mcmc
+from totani_helpers.mcmc_plotter import make_plots_from_mcmc
 
 
 def _repo_dir() -> str:

@@ -1,3 +1,29 @@
+"""
+Fermi bubble geometry and template construction utilities.
+
+This module provides functions for defining Fermi bubble spatial masks and
+constructing emission templates based on iterative thresholding of residual maps.
+
+Key Classes
+-----------
+BubblesIterationResult : Container for bubble mask iteration results
+
+Key Functions
+-------------
+build_flat_counts_template : Create flat emission template from mask
+iterate_bubbles_masks : Iteratively refine bubble masks from residuals
+cleanup_binary_mask : Morphological cleanup of binary masks
+
+The Fermi bubbles are modeled as regions with uniform emissivity, defined by
+spatial masks derived from residual gamma-ray emission after subtracting
+known backgrounds.
+
+Notes
+-----
+Bubble vertices can be provided as text files with (l, b) coordinates in degrees.
+The iterative masking approach follows the methodology of Totani (2025).
+"""
+
 import numpy as np
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
