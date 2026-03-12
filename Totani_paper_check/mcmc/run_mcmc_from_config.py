@@ -298,6 +298,7 @@ def _build_argv_from_structured(cfg: Dict[str, Any], *, cfg_dir: str) -> List[st
     _add_arg(argv, "--nsteps", cfg.get("nsteps", None))
     _add_arg(argv, "--burn", cfg.get("burn", None))
     _add_arg(argv, "--thin", cfg.get("thin", None))
+    _add_arg(argv, "--nprocs", cfg.get("nprocs", None))
 
     if "early_stop" in cfg:
         _add_boolopt(argv, "--early-stop", bool(cfg.get("early_stop")))

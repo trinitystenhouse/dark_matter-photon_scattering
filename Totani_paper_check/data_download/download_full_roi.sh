@@ -1,4 +1,3 @@
 bash download_fermi_totani_300_0.sh
+bash download_fermi_totani_45_0.sh
 bash download_fermi_totani_60_0.sh
-bash download_fermi_totani_0_-30.sh
-#bash download_fermi_totani_0_30.sh

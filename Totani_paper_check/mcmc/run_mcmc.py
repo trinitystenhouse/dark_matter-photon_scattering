@@ -7,6 +7,7 @@ import numpy as np
 from astropy.wcs import WCS
 import matplotlib.pyplot as plt
 import time
+import multiprocessing as mp
 
 try:
     from tqdm import tqdm  # type: ignore
@@ -127,7 +128,7 @@ def template_scale_report(k, Cobs_vec, mu, labels):
         mx = float(np.max(mu[j]))
         print(
             f"  {str(lab):12s}  sum(mu@f=1)={s:.3e}  median={med:.3e}  max={mx:.3e}  "
-            f"ratio_to_data={s / y if y > 0 else np.nan:.3e}"
+            f"ratio_to_data={s / y if y > 0 else np.nan:.3g}"
         )
 
 
@@ -461,6 +462,12 @@ def main():
     ap.add_argument("--nsteps", type=int, default=6000)
     ap.add_argument("--burn", type=int, default=1500)
     ap.add_argument("--thin", type=int, default=5)
+    ap.add_argument(
+        "--nprocs",
+        type=int,
+        default=0,
+        help="Number of parallel worker processes for emcee. Use 0/1 for serial; use e.g. 8 to use 8 CPU cores.",
+    )
     ap.add_argument("--outdir", default=os.path.join(os.path.dirname(__file__), "mcmc_results"))
     ap.add_argument(
         "--labels",
@@ -980,10 +987,21 @@ def main():
             print(f"    {lab}: [{lo_str}, {hi_str}]")
     
 
-
     # ---- Run MCMC
     vprint(2, "\nRunning MCMC...")
     t0 = time.time()
+
+    mp.freeze_support()
+    nprocs = int(args.nprocs)
+    pool = None
+    if nprocs > 1:
+        ctx = mp.get_context("spawn")
+        pool = ctx.Pool(processes=nprocs)
+        if verbosity >= 1:
+            print(f"Parallel emcee enabled: nprocs={nprocs}")
+    else:
+        if verbosity >= 1:
+            print("Parallel emcee disabled (serial logprob evaluation)")
 
     if args.nonstable_prior_centers is not None:
         try:
@@ -1084,31 +1102,38 @@ def main():
 
             print(f"  {lab}: " + " | ".join(pieces))
 
-    res = totani_mcmc_fit(
-        Cobs=Cobs,
-        mu=mu,
-        labels=labels,
-        f_init=f0,
-        bounds=bnds,
-        nwalkers=args.nwalkers,
-        nsteps=args.nsteps,
-        burn=args.burn,
-        thin=args.thin,
-        require_autocorr=bool(args.require_autocorr),
-        early_stop=bool(args.early_stop),
-        autocorr_target=float(args.autocorr_target),
-        autocorr_check_every=int(args.autocorr_check_every),
-        autocorr_min_steps=int(args.autocorr_min_steps),
-        iso_prior_sigma_dex=args.iso_prior_sigma_dex,
-        iso_prior_mode=str(args.iso_prior_mode),
-        iso_prior_center=iso_center,
-        nonstable_prior_sigma_dex=args.nonstable_prior_sigma,
-        nonstable_prior_centers=nonstable_centers,
-        component_priors=component_priors_f,
-        init_jitter_frac=1e-3,
-        progress=bool(args.progress) and (verbosity > 0),
-        verbosity=verbosity,
-    )
+    try:
+        res = totani_mcmc_fit(
+            Cobs=Cobs,
+            mu=mu,
+            labels=labels,
+            f_init=f0,
+            bounds=bnds,
+            nwalkers=args.nwalkers,
+            nsteps=args.nsteps,
+            burn=args.burn,
+            thin=args.thin,
+            require_autocorr=bool(args.require_autocorr),
+            early_stop=bool(args.early_stop),
+            autocorr_target=float(args.autocorr_target),
+            autocorr_check_every=int(args.autocorr_check_every),
+            autocorr_min_steps=int(args.autocorr_min_steps),
+            iso_prior_sigma_dex=args.iso_prior_sigma_dex,
+            iso_prior_mode=str(args.iso_prior_mode),
+            iso_prior_center=iso_center,
+            nonstable_prior_sigma_dex=args.nonstable_prior_sigma,
+            nonstable_prior_centers=nonstable_centers,
+            component_priors=component_priors_f,
+            init_jitter_frac=1e-3,
+            progress=bool(args.progress) and (verbosity > 0),
+            verbosity=verbosity,
+            pool=pool,
+        )
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
+
     dt = time.time() - t0
     if verbosity >= 1:
         print(f"MCMC wall time: {dt:.2f} s  ({dt/60:.2f} min)")

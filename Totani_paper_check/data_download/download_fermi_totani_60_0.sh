@@ -9,10 +9,12 @@ if [[ -z "${REPO_DIR:-}" ]]; then
     REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fi
 
-DATA_DIR="${REPO_DIR}/fermi_data/totani/60_0"
+DATA_DIR="${REPO_DIR}/fermi_data/totani/0_-45"
 BASE_URL="https://fermi.gsfc.nasa.gov/FTP/fermi/data/lat/queries"
-TAG="L2603090816493F2F87D174"
+TAG="L2603110707403F2F87D153"
 
+#wget https://fermi.gsfc.nasa.gov/FTP/fermi/data/lat/queries/L2603110707403F2F87D153_SC00.fits
+#wget https://fermi.gsfc.nasa.gov/FTP/fermi/data/lat/queries/L2603110707403F2F87D153_PH00.fits
 mkdir -p "${DATA_DIR}"
 cd "${DATA_DIR}"
 
@@ -35,9 +37,9 @@ download() {
 # wget https://fermi.gsfc.nasa.gov/FTP/fermi/data/lat/queries/L2603090816493F2F87D174_SC00.fits
 # wget https://fermi.gsfc.nasa.gov/FTP/fermi/data/lat/queries/L2603090816493F2F87D174_PH00.fits
 
-# Spacecraft file
-echo "[1/2] Spacecraft file"
-download "${TAG}_SC00.fits"
+# # Spacecraft file
+# echo "[1/2] Spacecraft file"
+# download "${TAG}_SC00.fits"
 
 # Photon files
 echo "[2/2] Photon file PH00"

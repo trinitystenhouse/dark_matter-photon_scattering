@@ -1,6 +1,6 @@
 import numpy as np
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Sequence
+from typing import List, Tuple, Optional, Sequence, Any, Dict
 
 
 @dataclass
@@ -15,6 +15,142 @@ class MCMCResult:
     logprob: np.ndarray
     acceptance_fraction: np.ndarray
     used_emcee: bool
+
+
+@dataclass
+class _LogProbCallable:
+    Cobs: np.ndarray
+    mu: np.ndarray
+    bounds: Sequence[Tuple[float, float]]
+    labels_l: List[str]
+    f_init: np.ndarray
+    iso_prior_sigma_dex: Optional[float]
+    iso_prior_mode: str
+    iso_prior_center: Optional[float]
+    nonstable_prior_sigma_dex: Optional[float]
+    nonstable_prior_centers: Optional[Dict[str, Any]]
+    component_priors: Optional[Dict[str, Any]]
+
+    def _log10_ratio_gauss(self, x: float, x0: float, sigma_dex: float) -> float:
+        if (sigma_dex is None) or (sigma_dex <= 0) or (not np.isfinite(sigma_dex)):
+            return 0.0
+        if (not np.isfinite(x)) or (not np.isfinite(x0)) or (x <= 0) or (x0 <= 0):
+            return -np.inf
+        z = np.log10(x / x0)
+        return -0.5 * (z / float(sigma_dex)) ** 2
+
+    def _log10_ratio_gauss_upper_only(self, x: float, x0: float, sigma_dex: float) -> float:
+        if (sigma_dex is None) or (sigma_dex <= 0) or (not np.isfinite(sigma_dex)):
+            return 0.0
+        if (not np.isfinite(x)) or (not np.isfinite(x0)) or (x <= 0) or (x0 <= 0):
+            return -np.inf
+        if x <= x0:
+            return 0.0
+        z = np.log10(x / x0)
+        return -0.5 * (z / float(sigma_dex)) ** 2
+
+    def _log10_ratio_gauss_lower_only(self, x: float, x0: float, sigma_dex: float) -> float:
+        if (sigma_dex is None) or (sigma_dex <= 0) or (not np.isfinite(sigma_dex)):
+            return 0.0
+        if (not np.isfinite(x)) or (not np.isfinite(x0)) or (x <= 0) or (x0 <= 0):
+            return -np.inf
+        if x >= x0:
+            return 0.0
+        z = np.log10(x / x0)
+        return -0.5 * (z / float(sigma_dex)) ** 2
+
+    def _log10_ratio_gauss_mode(self, x: float, x0: float, sigma_dex: float, mode: str) -> float:
+        m = str(mode).strip().lower()
+        if m in ("f_upper", "upper", "upper_only"):
+            return self._log10_ratio_gauss_upper_only(x, x0, sigma_dex)
+        if m in ("f_lower", "lower", "lower_only"):
+            return self._log10_ratio_gauss_lower_only(x, x0, sigma_dex)
+        return self._log10_ratio_gauss(x, x0, sigma_dex)
+
+    def logprior_gaussian(self, f: np.ndarray) -> float:
+        lp = 0.0
+
+        if self.iso_prior_sigma_dex is not None:
+            jiso = None
+            for key in ("iso", "isotropic"):
+                if key in self.labels_l:
+                    jiso = self.labels_l.index(key)
+                    break
+
+            if jiso is not None:
+                center = float(self.iso_prior_center) if (self.iso_prior_center is not None) else float(self.f_init[jiso])
+                mode = str(self.iso_prior_mode).strip().lower()
+                if mode in ("f_upper", "upper", "upper_only"):
+                    lp_i = self._log10_ratio_gauss_upper_only(float(f[jiso]), center, float(self.iso_prior_sigma_dex))
+                elif mode in ("f_lower", "lower", "lower_only"):
+                    lp_i = self._log10_ratio_gauss_lower_only(float(f[jiso]), center, float(self.iso_prior_sigma_dex))
+                else:
+                    lp_i = self._log10_ratio_gauss(float(f[jiso]), center, float(self.iso_prior_sigma_dex))
+                if not np.isfinite(lp_i):
+                    return -np.inf
+                lp += lp_i
+
+        if self.nonstable_prior_sigma_dex is not None:
+            centers = self.nonstable_prior_centers or {}
+            for lab_key, ctr in centers.items():
+                lk = str(lab_key).lower()
+                if lk in ("iso", "isotropic"):
+                    continue
+                if lk not in self.labels_l:
+                    continue
+                j = self.labels_l.index(lk)
+                lp_j = self._log10_ratio_gauss(float(f[j]), float(ctr), float(self.nonstable_prior_sigma_dex))
+                if not np.isfinite(lp_j):
+                    return -np.inf
+                lp += lp_j
+
+        if self.component_priors is not None:
+            if not isinstance(self.component_priors, dict):
+                return -np.inf
+            for lab_key, spec in self.component_priors.items():
+                lk = str(lab_key).lower()
+                if lk not in self.labels_l:
+                    continue
+                if spec is None:
+                    continue
+                if not isinstance(spec, dict):
+                    return -np.inf
+
+                sigma = spec.get("sigma_dex", None)
+                if sigma is None:
+                    continue
+                sigma = float(sigma)
+                if (not np.isfinite(sigma)) or (sigma <= 0):
+                    continue
+
+                if "center" not in spec:
+                    continue
+                center = float(spec.get("center"))
+                mode = spec.get("mode", "f")
+
+                j = self.labels_l.index(lk)
+                lp_j = self._log10_ratio_gauss_mode(float(f[j]), center, sigma, str(mode))
+                if not np.isfinite(lp_j):
+                    return -np.inf
+                lp += lp_j
+
+        return float(lp)
+
+    def __call__(self, f: np.ndarray) -> float:
+        lp = logprior_bounds_inclusive(f, self.bounds)
+        if not np.isfinite(lp):
+            return -np.inf
+
+        lp_g = self.logprior_gaussian(f)
+        if not np.isfinite(lp_g):
+            return -np.inf
+
+        Cexp = f @ self.mu
+        ll = loglike_poisson_counts(self.Cobs, Cexp)
+        if not np.isfinite(ll):
+            return -np.inf
+
+        return float(lp + lp_g + ll)
 
 
 def loglike_poisson_counts(Cobs: np.ndarray, Cexp: np.ndarray) -> float:
@@ -168,6 +304,7 @@ def totani_mcmc_fit(
     rng: Optional[np.random.Generator] = None,
     progress: bool = False,
     verbosity: int = 2,
+    pool: Any = None,
 ):
     def vprint(level: int, *args, **kwargs):
         if int(verbosity) >= int(level):
@@ -196,133 +333,19 @@ def totani_mcmc_fit(
 
     labels_l = [str(x).lower() for x in labels]
 
-    def _log10_ratio_gauss(x: float, x0: float, sigma_dex: float) -> float:
-        if (sigma_dex is None) or (sigma_dex <= 0) or (not np.isfinite(sigma_dex)):
-            return 0.0
-        if (not np.isfinite(x)) or (not np.isfinite(x0)) or (x <= 0) or (x0 <= 0):
-            return -np.inf
-        z = np.log10(x / x0)
-        return -0.5 * (z / float(sigma_dex)) ** 2
-
-    def _log10_ratio_gauss_upper_only(x: float, x0: float, sigma_dex: float) -> float:
-        if (sigma_dex is None) or (sigma_dex <= 0) or (not np.isfinite(sigma_dex)):
-            return 0.0
-        if (not np.isfinite(x)) or (not np.isfinite(x0)) or (x <= 0) or (x0 <= 0):
-            return -np.inf
-        if x <= x0:
-            return 0.0
-        z = np.log10(x / x0)
-        return -0.5 * (z / float(sigma_dex)) ** 2
-
-    def _log10_ratio_gauss_lower_only(x: float, x0: float, sigma_dex: float) -> float:
-        if (sigma_dex is None) or (sigma_dex <= 0) or (not np.isfinite(sigma_dex)):
-            return 0.0
-        if (not np.isfinite(x)) or (not np.isfinite(x0)) or (x <= 0) or (x0 <= 0):
-            return -np.inf
-        if x >= x0:
-            return 0.0
-        z = np.log10(x / x0)
-        return -0.5 * (z / float(sigma_dex)) ** 2
-
-    def _log10_ratio_gauss_mode(x: float, x0: float, sigma_dex: float, mode: str) -> float:
-        m = str(mode).strip().lower()
-        if m in ("f_upper", "upper", "upper_only"):
-            return _log10_ratio_gauss_upper_only(x, x0, sigma_dex)
-        if m in ("f_lower", "lower", "lower_only"):
-            return _log10_ratio_gauss_lower_only(x, x0, sigma_dex)
-        return _log10_ratio_gauss(x, x0, sigma_dex)
-
-    def logprior_gaussian(f: np.ndarray) -> float:
-        lp = 0.0
-
-        # ISO prior (log-space around iso_prior_center)
-        if iso_prior_sigma_dex is not None:
-            jiso = None
-            for key in ("iso", "isotropic"):
-                if key in labels_l:
-                    jiso = labels_l.index(key)
-                    break
-
-            if jiso is not None:
-                center = float(iso_prior_center) if (iso_prior_center is not None) else float(f_init[jiso])
-                mode = str(iso_prior_mode).strip().lower()
-                if mode in ("f_upper", "upper", "upper_only"):
-                    lp_i = _log10_ratio_gauss_upper_only(float(f[jiso]), center, float(iso_prior_sigma_dex))
-                elif mode in ("f_lower", "lower", "lower_only"):
-                    lp_i = _log10_ratio_gauss_lower_only(float(f[jiso]), center, float(iso_prior_sigma_dex))
-                else:
-                    lp_i = _log10_ratio_gauss(float(f[jiso]), center, float(iso_prior_sigma_dex))
-                if not np.isfinite(lp_i):
-                    return -np.inf
-                lp += lp_i
-
-        # Nonstable priors (optional): dict(label->center)
-        if nonstable_prior_sigma_dex is not None:
-            centers = nonstable_prior_centers or {}
-            for lab_key, ctr in centers.items():
-                lk = str(lab_key).lower()
-                if lk in ("iso", "isotropic"):
-                    continue
-                if lk not in labels_l:
-                    continue
-                j = labels_l.index(lk)
-                lp_j = _log10_ratio_gauss(float(f[j]), float(ctr), float(nonstable_prior_sigma_dex))
-                if not np.isfinite(lp_j):
-                    return -np.inf
-                lp += lp_j
-
-        # General per-component priors (optional): dict(label -> {center, sigma_dex, mode})
-        # This is more flexible than nonstable_prior_* because sigma and mode can vary per label.
-        if component_priors is not None:
-            if not isinstance(component_priors, dict):
-                return -np.inf
-            for lab_key, spec in component_priors.items():
-                lk = str(lab_key).lower()
-                if lk not in labels_l:
-                    continue
-                if spec is None:
-                    continue
-                if not isinstance(spec, dict):
-                    return -np.inf
-
-                sigma = spec.get("sigma_dex", None)
-                if sigma is None:
-                    continue
-                sigma = float(sigma)
-                if (not np.isfinite(sigma)) or (sigma <= 0):
-                    continue
-
-                if "center" not in spec:
-                    continue
-                center = float(spec.get("center"))
-                mode = spec.get("mode", "f")
-
-                j = labels_l.index(lk)
-                lp_j = _log10_ratio_gauss_mode(float(f[j]), center, sigma, str(mode))
-                if not np.isfinite(lp_j):
-                    return -np.inf
-                lp += lp_j
-
-        return float(lp)
-
-    def logprob_fn(f: np.ndarray) -> float:
-        lp = logprior_bounds_inclusive(f, bounds)
-        if not np.isfinite(lp):
-            return -np.inf
-
-        lp_g = logprior_gaussian(f)
-        if not np.isfinite(lp_g):
-            return -np.inf
-
-        # Expected counts (npix,)
-        Cexp = f @ mu
-
-        # Poisson requires strictly positive expectation everywhere in the fit mask
-        ll = loglike_poisson_counts(Cobs, Cexp)
-        if not np.isfinite(ll):
-            return -np.inf
-
-        return float(lp + lp_g + ll)
+    logprob_fn = _LogProbCallable(
+        Cobs=Cobs,
+        mu=mu,
+        bounds=bounds,
+        labels_l=labels_l,
+        f_init=f_init,
+        iso_prior_sigma_dex=iso_prior_sigma_dex,
+        iso_prior_mode=iso_prior_mode,
+        iso_prior_center=iso_prior_center,
+        nonstable_prior_sigma_dex=nonstable_prior_sigma_dex,
+        nonstable_prior_centers=nonstable_prior_centers,
+        component_priors=component_priors,
+    )
 
     # --------------------------
     # Initialize walkers
@@ -396,7 +419,7 @@ def totani_mcmc_fit(
         import emcee  # type: ignore
         used_emcee = True
 
-        sampler = emcee.EnsembleSampler(nwalkers, ncomp, logprob_fn)
+        sampler = emcee.EnsembleSampler(nwalkers, ncomp, logprob_fn, pool=pool)
 
         def _report_autocorr_status(*, n_done: int):
             try:

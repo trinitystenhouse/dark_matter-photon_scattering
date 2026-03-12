@@ -1,13 +1,13 @@
 #
 # $Header: /nfs/slac/g/glast/ground/cvs/ScienceTools-scons/dataSubselector/pfiles/gtmktime.par,v 1.7 2010/04/07 19:18:35 jchiang Exp $
 #
-scfile,f,a,"/Users/trinitystenhouse/Documents/PhD/Year 2/DM_Photon_Scattering/fermi_data/totani/processed/spacecraft_merged.fits",,,"Spacecraft data file"
+scfile,f,a,"/mnt/c/Users/Guest User/Documents/trinity/dark_matter-photon_scattering/fermi_data/totani/processed/spacecraft_merged.fits",,,"Spacecraft data file"
 sctable,s,h,"SC_DATA",,,"Spacecraft data extension"
 filter,s,a,"(DATA_QUAL>0)&&(LAT_CONFIG==1)",,,"Filter expression"
 roicut,b,a,no,,,"Apply ROI-based zenith angle cut"
-evfile,f,a,"/Users/trinitystenhouse/Documents/PhD/Year 2/DM_Photon_Scattering/fermi_data/totani/processed/merged_all_queries_raw.fits",,,"Event data file"
+evfile,f,a,"/mnt/c/Users/Guest User/Documents/trinity/dark_matter-photon_scattering/fermi_data/totani/60_0/L2603090816493F2F87D174_PH00.fits",,,"Event data file"
 evtable,s,h,"EVENTS",,,"Event data extension"
-outfile,s,a,"/Users/trinitystenhouse/Documents/PhD/Year 2/DM_Photon_Scattering/fermi_data/totani/processed/events_gti.fits",,,"Output event file name"
+outfile,s,a,"/mnt/c/Users/Guest User/Documents/trinity/dark_matter-photon_scattering/fermi_data/totani/processed/L2603090816493F2F87D174_PH00_gti.fits",,,"Output event file name"
 apply_filter,b,h,yes,,,"apply GTI filter"
 
 overwrite,b,h,no,,,"Build GTI from scratch (overwrite existing GTI)"
