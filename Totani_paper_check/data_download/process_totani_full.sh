@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+#CLEAN=1 PER_FILE_FILTER=1 bash Totani_paper_check/data_download/process_totani_full.sh
+
 # ============================================================
 # Build Totani-style Fermi-LAT products from 4 downloaded
 # LAT query folders, merging and de-duplicating overlapping
@@ -110,6 +112,57 @@ need_cmd gtselect
 need_cmd gtbin
 need_cmd gtltcube
 need_cmd gtexpcube2
+
+ALIAS_CONFIG=""
+if [[ -n "${FERMI_DIR:-}" ]] && [[ -f "${FERMI_DIR}/share/fermitools/refdata/fermi/caldb/software/tools/alias_config.fits" ]]; then
+  ALIAS_CONFIG="${FERMI_DIR}/share/fermitools/refdata/fermi/caldb/software/tools/alias_config.fits"
+elif [[ -n "${FERMI_DIR:-}" ]] && [[ -f "${FERMI_DIR}/refdata/fermi/caldb/software/tools/alias_config.fits" ]]; then
+  ALIAS_CONFIG="${FERMI_DIR}/refdata/fermi/caldb/software/tools/alias_config.fits"
+elif [[ -n "${CONDA_PREFIX:-}" ]] && [[ -f "${CONDA_PREFIX}/share/fermitools/refdata/fermi/caldb/software/tools/alias_config.fits" ]]; then
+  ALIAS_CONFIG="${CONDA_PREFIX}/share/fermitools/refdata/fermi/caldb/software/tools/alias_config.fits"
+elif [[ -n "${CONDA_PREFIX:-}" ]] && [[ -f "${CONDA_PREFIX}/share/fermitools/data/caldb/software/tools/alias_config.fits" ]]; then
+  ALIAS_CONFIG="${CONDA_PREFIX}/share/fermitools/data/caldb/software/tools/alias_config.fits"
+elif [[ -n "${CONDA_PREFIX:-}" ]] && [[ -f "${CONDA_PREFIX}/refdata/fermi/caldb/software/tools/alias_config.fits" ]]; then
+  ALIAS_CONFIG="${CONDA_PREFIX}/refdata/fermi/caldb/software/tools/alias_config.fits"
+fi
+
+if [[ -z "${ALIAS_CONFIG}" ]]; then
+  echo "ERROR: Missing Fermitools refdata/CALDB file required by gtltcube:" >&2
+  echo "  alias_config.fits" >&2
+  echo "Detected:" >&2
+  echo "  CONDA_PREFIX=${CONDA_PREFIX:-<unset>}" >&2
+  echo "  FERMI_DIR=${FERMI_DIR:-<unset>}" >&2
+  echo "Expected at one of:" >&2
+  echo "  \$CONDA_PREFIX/share/fermitools/refdata/fermi/caldb/software/tools/alias_config.fits" >&2
+  echo "  \$CONDA_PREFIX/share/fermitools/data/caldb/software/tools/alias_config.fits" >&2
+  echo "  \$CONDA_PREFIX/refdata/fermi/caldb/software/tools/alias_config.fits" >&2
+  echo "  \$FERMI_DIR/share/fermitools/refdata/fermi/caldb/software/tools/alias_config.fits" >&2
+  echo "  \$FERMI_DIR/refdata/fermi/caldb/software/tools/alias_config.fits" >&2
+  echo "Fix options:" >&2
+  echo "  - Activate the conda env that provides full Fermitools refdata (then re-run)." >&2
+  echo "  - Install the Fermitools refdata/CALDB package for your environment." >&2
+  echo "  - Or set FERMI_DIR/CONDA_PREFIX so the above path exists." >&2
+  exit 1
+fi
+
+CALDB_FROM_ALIAS="$(dirname "$(dirname "$(dirname "${ALIAS_CONFIG}")")")"
+export CALDB="${CALDB:-${CALDB_FROM_ALIAS}}"
+
+# Some conda installs place alias_config.fits under share/fermitools/data/caldb,
+# but gtltcube may still look specifically under share/fermitools/refdata/fermi/caldb.
+# To avoid mutating the conda env, create a small local FERMI_DIR shim that provides
+# the expected refdata path.
+if [[ -n "${CONDA_PREFIX:-}" ]]; then
+  EXPECTED_ALIAS="${CONDA_PREFIX}/share/fermitools/refdata/fermi/caldb/software/tools/alias_config.fits"
+  if [[ ! -f "${EXPECTED_ALIAS}" ]] && [[ "${ALIAS_CONFIG}" == "${CONDA_PREFIX}"/share/fermitools/data/caldb/*/alias_config.fits ]]; then
+    FERMI_SHIM="${OUT_DIR}/fermi_shim"
+    mkdir -p "${FERMI_SHIM}/share/fermitools/refdata/fermi"
+    if [[ ! -e "${FERMI_SHIM}/share/fermitools/refdata/fermi/caldb" ]]; then
+      ln -s "${CONDA_PREFIX}/share/fermitools/data/caldb" "${FERMI_SHIM}/share/fermitools/refdata/fermi/caldb"
+    fi
+    export FERMI_DIR="${FERMI_SHIM}"
+  fi
+fi
 
 # Always pick a python interpreter for the deduplication step (and merge fallback)
 if command -v python3 >/dev/null 2>&1 && python3 -c "import astropy" >/dev/null 2>&1; then
@@ -761,7 +814,10 @@ fi
 echo
 echo "==> De-duplicating selected photon events -> ${PHDEDUP}"
 
-OUT_DIR="${OUT_DIR}" IN_FITS="${SEL_FILE}" OUT_FITS="${PHDEDUP}" "${PYTHON_BIN}" <<'PY'
+if [[ -s "${PHDEDUP}" ]]; then
+  echo "==> Dedup file already exists; skipping: ${PHDEDUP}"
+else
+  OUT_DIR="${OUT_DIR}" IN_FITS="${SEL_FILE}" OUT_FITS="${PHDEDUP}" "${PYTHON_BIN}" <<'PY'
 import os
 from pathlib import Path
 import numpy as np
@@ -827,6 +883,7 @@ with fits.open(infile, memmap=True) as hdul:
 
     new_hdul.writeto(outfile, overwrite=True)
 PY
+fi
 
 # Ensure GTI exists on the deduplicated file for downstream tools
 OUT_FITS="${PHDEDUP}" SRC_FITS="${SEL_FILE}" "${PYTHON_BIN}" <<'PY'
@@ -878,9 +935,8 @@ gtbin \
   "xref=${XREF}" "yref=${YREF}" \
   "nxpix=${NX}" "nypix=${NY}" \
   "binsz=${BINSZ}" \
-  "ebinalg=LOG" \
-  "emin=${EMIN}" "emax=${EMAX}" \
-  "enumbins=${ENUMBINS}"
+  "ebinalg=FILE" \
+  "ebinfile=totani_13bins.fits"
 
 # ------------------------------------------------------------
 # 7) Optional integrated counts image
@@ -928,9 +984,8 @@ gtexpcube2 \
   "xref=${XREF}" "yref=${YREF}" \
   "nxpix=${NX}" "nypix=${NY}" \
   "binsz=${BINSZ}" \
-  "ebinalg=LOG" \
-  "emin=${EMIN}" "emax=${EMAX}" \
-  "enumbins=${ENUMBINS}"
+  "ebinalg=FILE" \
+  "ebinfile=totani_13bins.fits"
 
 echo
 echo "===================================="

@@ -227,8 +227,8 @@ def main():
     )
 
     here = os.path.dirname(__file__)
-    ap.add_argument("--verts-north", default=os.path.join(here, "bubble_vertices_north.txt"))
-    ap.add_argument("--verts-south", default=os.path.join(here, "bubble_vertices_south.txt"))
+    ap.add_argument("--verts-north", default=os.path.join(repo_dir, "fermi_data", "totani", "templates", "bubble_vertices_north.txt"))
+    ap.add_argument("--verts-south", default=os.path.join(repo_dir, "fermi_data", "totani", "templates", "bubble_vertices_south.txt"))
     ap.add_argument(
         "--restrict-to-vertices",
         default=True,
@@ -243,7 +243,7 @@ def main():
     )
 
     ap.add_argument("--n-iter", type=int, default=4)
-    ap.add_argument("--smooth-sigma-deg", type=float, default=2.0)
+    ap.add_argument("--smooth-sigma-deg", type=float, default=1.0)
     ap.add_argument("--pos-thresh", type=float, default=0.0)
     ap.add_argument("--neg-thresh", type=float, default=0.0)
     ap.add_argument("--morph-open-deg", type=float, default=1.0)
