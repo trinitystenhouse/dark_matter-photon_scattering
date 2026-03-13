@@ -1,29 +1,3 @@
-"""
-Fermi bubble geometry and template construction utilities.
-
-This module provides functions for defining Fermi bubble spatial masks and
-constructing emission templates based on iterative thresholding of residual maps.
-
-Key Classes
------------
-BubblesIterationResult : Container for bubble mask iteration results
-
-Key Functions
--------------
-build_flat_counts_template : Create flat emission template from mask
-iterate_bubbles_masks : Iteratively refine bubble masks from residuals
-cleanup_binary_mask : Morphological cleanup of binary masks
-
-The Fermi bubbles are modeled as regions with uniform emissivity, defined by
-spatial masks derived from residual gamma-ray emission after subtracting
-known backgrounds.
-
-Notes
------
-Bubble vertices can be provided as text files with (l, b) coordinates in degrees.
-The iterative masking approach follows the methodology of Totani (2025).
-"""
-
 import numpy as np
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -327,6 +301,8 @@ def iterate_bubbles_masks(
     alpha: float = 0.0,
     stop_frac: float = 0.01,
     ridge: float = 0.0,
+    include_bubbles_in_fit: bool = True,
+    keep_by_hemisphere: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, List[BubblesIterationResult]]:
     counts = np.asarray(counts, dtype=float)
     expo = np.asarray(expo, dtype=float)
@@ -390,7 +366,7 @@ def iterate_bubbles_masks(
                 raise KeyError(f"Missing template '{name}'")
             templates_list.append(np.asarray(templates_counts[name], float))
 
-        if it > 0:
+        if bool(include_bubbles_in_fit) and it > 0:
             mu_pos = build_flat_counts_template(
                 mask2d=pos_mask,
                 expo=expo,
@@ -436,8 +412,12 @@ def iterate_bubbles_masks(
         pos_new = cleanup_binary_mask(pos_raw, r_open_pix=r_open_pix, r_close_pix=r_close_pix)
         neg_new = cleanup_binary_mask(neg_raw, r_open_pix=r_open_pix, r_close_pix=r_close_pix)
 
-        pos_new = keep_largest_cc_by_hemisphere(pos_new, lat_deg_2d=lat)
-        neg_new = keep_largest_cc_by_hemisphere(neg_new, lat_deg_2d=lat)
+        if bool(keep_by_hemisphere):
+            pos_new = keep_largest_cc_by_hemisphere(pos_new, lat_deg_2d=lat)
+            neg_new = keep_largest_cc_by_hemisphere(neg_new, lat_deg_2d=lat)
+        else:
+            pos_new = keep_largest_cc(pos_new)
+            neg_new = keep_largest_cc(neg_new)
 
         pos_new, neg_new = resolve_overlap(pos_mask=pos_new, neg_mask=neg_new, smoothed=smoothed)
 

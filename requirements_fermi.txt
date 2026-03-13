@@ -1,3 +1,4 @@
 # Fermi Science Tools
 fermitools>=2.0.0
 fermi-science-tools>=1.2.1
+fitsio

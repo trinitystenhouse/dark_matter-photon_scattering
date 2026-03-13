@@ -16,9 +16,9 @@ import os
 REPO_DIR = os.environ["REPO_PATH"]
 DATA_DIR = os.path.join(REPO_DIR, "fermi_data", "totani", "processed")
 
-COUNTS_CCUBE = os.path.join(DATA_DIR, "counts_ccube_1000to1000000.fits")
+COUNTS_CCUBE = os.path.join(DATA_DIR, "counts_ccube_1000to1000000_keV.fits")
 EXPCUBE      = os.path.join(DATA_DIR, "expcube_1000to1000000.fits")
-COUNTS_CMAP  = os.path.join(DATA_DIR, "counts_cmap_1000to1000000.fits")
+COUNTS_CMAP  = os.path.join(DATA_DIR, "counts_cmap_1000to1000000_keV.fits")
 
 OUTDIR = "sanity_plots"
 os.makedirs(OUTDIR, exist_ok=True)
@@ -105,16 +105,24 @@ print("\n=== ENERGY BINS ===")
 print("N bins:", len(ectr))
 print("GeV bin centers:", np.round(ectr, 3))
 
+emin_gev = float(np.nanmin(emin)) / 1000.0
+emax_gev = float(np.nanmax(emax)) / 1000.0
+
 # -------------------------
 # CMAP quick-look (integrated counts)
 # -------------------------
 if os.path.exists(COUNTS_CMAP):
+    if str(os.environ.get("SANITY_DEBUG_CMAP", "0")).strip() not in ("", "0", "false", "False"):
+        print("\n=== CMAP HDU LIST ===")
+        with fits.open(COUNTS_CMAP) as hdul:
+            hdul.info()
+
     cmap = fits.getdata(COUNTS_CMAP).astype(float)
 
     plt.figure(figsize=(6, 5))
     plt.imshow(np.log10(np.maximum(cmap, 1)), origin="lower", cmap="inferno")
     plt.colorbar(label=r"$\log_{10}(\mathrm{counts})$")
-    plt.title("Integrated counts (CMAP)")
+    plt.title(f"Integrated counts (CMAP)\n{emin_gev:.3g}–{emax_gev:.3g} GeV")
     plt.xlabel("pixel x")
     plt.ylabel("pixel y")
     plt.tight_layout()

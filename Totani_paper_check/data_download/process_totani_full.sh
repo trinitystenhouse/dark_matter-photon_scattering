@@ -2,6 +2,8 @@
 set -euo pipefail
 
 #CLEAN=1 PER_FILE_FILTER=1 bash Totani_paper_check/data_download/process_totani_full.sh
+# export PFILES="/Users/trinitystenhouse/Documents/PhD/Year 2/DM_Photon_Scattering/fermi_data/totani/processed/pfiles;$CONDA_PREFIX/share/fermitools/syspfiles"
+# bash process_totani_full.sh
 
 # ============================================================
 # Build Totani-style Fermi-LAT products from 4 downloaded
@@ -234,10 +236,10 @@ PHDEDUP="${OUT_DIR}/events_gti_sel_dedup.fits"
 
 SEL_LIST="${OUT_DIR}/sel_gti_list.txt"
 
-COUNTS_CCUBE="${OUT_DIR}/counts_ccube_${EMIN}to${EMAX}.fits"
-COUNTS_CMAP="${OUT_DIR}/counts_cmap_${EMIN}to${EMAX}.fits"
-LTCUBE="${OUT_DIR}/ltcube_${EMIN}to${EMAX}.fits"
-EXPCUBE="${OUT_DIR}/expcube_${EMIN}to${EMAX}.fits"
+COUNTS_CCUBE="${OUT_DIR}/counts_ccube_${EMIN}to${EMAX}_keV.fits"
+COUNTS_CMAP="${OUT_DIR}/counts_cmap_${EMIN}to${EMAX}_keV.fits"
+LTCUBE="${OUT_DIR}/ltcube_${EMIN}to${EMAX}_keV.fits"
+EXPCUBE="${OUT_DIR}/expcube_${EMIN}to${EMAX}_keV.fits"
 
 # Optional cleanup of intermediate outputs (does NOT touch raw query folders)
 if [[ "${CLEAN:-0}" == "1" ]]; then
@@ -935,8 +937,10 @@ gtbin \
   "xref=${XREF}" "yref=${YREF}" \
   "nxpix=${NX}" "nypix=${NY}" \
   "binsz=${BINSZ}" \
-  "ebinalg=FILE" \
-  "ebinfile=totani_13bins.fits"
+  "ebinalg=LOG" \
+  "emin=1161.872047" \
+  "emax=1057896.180080" \
+  "enumbins=13"
 
 # ------------------------------------------------------------
 # 7) Optional integrated counts image
@@ -984,8 +988,10 @@ gtexpcube2 \
   "xref=${XREF}" "yref=${YREF}" \
   "nxpix=${NX}" "nypix=${NY}" \
   "binsz=${BINSZ}" \
-  "ebinalg=FILE" \
-  "ebinfile=totani_13bins.fits"
+  "ebinalg=LOG" \
+  "emin=1161.872047" \
+  "emax=1057896.180080" \
+  "enumbins=13"
 
 echo
 echo "===================================="

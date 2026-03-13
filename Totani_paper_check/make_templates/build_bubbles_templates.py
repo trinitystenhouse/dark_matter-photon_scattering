@@ -37,7 +37,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from totani_helpers.bubbles_templates import (
     build_flat_counts_template,
+    build_model_counts,
     iterate_bubbles_masks,
+    nnls_fit_per_energy,
 )
 from totani_helpers.fit_utils import load_mu_templates_from_fits
 from totani_helpers.totani_io import (
@@ -243,11 +245,18 @@ def main():
     )
 
     ap.add_argument("--n-iter", type=int, default=4)
-    ap.add_argument("--smooth-sigma-deg", type=float, default=1.0)
+    ap.add_argument("--smooth-sigma-deg", type=float, default=2.0)
     ap.add_argument("--pos-thresh", type=float, default=0.0)
     ap.add_argument("--neg-thresh", type=float, default=0.0)
     ap.add_argument("--morph-open-deg", type=float, default=1.0)
     ap.add_argument("--morph-close-deg", type=float, default=2.0)
+
+    ap.add_argument(
+        "--keep-by-hemisphere",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="If enabled, keep the largest connected component separately in the north and south hemispheres.",
+    )
 
     ap.add_argument("--alpha", type=float, default=0.0)
     ap.add_argument("--stop-frac", type=float, default=0.01)
@@ -255,6 +264,22 @@ def main():
     ap.add_argument("--out-dir", default=os.path.join(data_dir, "processed", "templates"))
     ap.add_argument("--save-counts-templates", action="store_true")
     ap.add_argument("--out-plots", default=os.path.join(here, "plots"))
+
+    ap.add_argument(
+        "--force-bubbles-close-residual",
+        default=False,
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "Force the positive and negative bubble templates to partition the post-background residual exactly "
+            "in the construction bin, rather than treating them as independent free templates in a later fit."
+        ),
+    )
+    ap.add_argument(
+        "--k-construct",
+        type=int,
+        default=2,
+        help="Energy-bin index to enforce exact residual closure (default: 2).",
+    )
 
     ap.add_argument(
         "--components",
@@ -363,6 +388,8 @@ def main():
         alpha=float(args.alpha),
         stop_frac=float(args.stop_frac),
         ridge=0.0,
+        include_bubbles_in_fit=(not bool(args.force_bubbles_close_residual)),
+        keep_by_hemisphere=bool(args.keep_by_hemisphere),
     )
 
     # Save masks
@@ -412,6 +439,43 @@ def main():
         Ectr_mev=Ectr_mev,
         iso_target_E2=iso_target_E2,
     )
+
+    if bool(args.force_bubbles_close_residual):
+        k2 = int(args.k_construct)
+        if k2 < 0 or k2 >= nE:
+            raise ValueError(f"k-construct {k2} out of range [0,{nE-1}]")
+
+        base_templates = [np.asarray(templates_counts[lab], float) for lab in labels]
+        fit3d = np.repeat(np.asarray(fit2d, bool)[None, :, :], nE, axis=0)
+        coeffs_nb = nnls_fit_per_energy(counts=counts, templates=base_templates, mask3d=fit3d, ridge=0.0)
+        model_nonbubble = build_model_counts(coeffs=coeffs_nb, templates=base_templates)
+        resid_counts = counts - model_nonbubble
+
+        # This mode forces the positive and negative bubble templates to partition the
+        # post-background residual exactly in the construction bin, rather than treating
+        # them as independent free templates in a later fit.
+        resid2d = np.asarray(resid_counts[k2], float)
+        mfit = np.asarray(fit2d, bool)
+
+        resid2d_fit = np.where(mfit, resid2d, 0.0)
+        mu_pos[k2] = np.clip(resid2d_fit, 0.0, None)
+        mu_neg[k2] = np.clip(resid2d_fit, None, 0.0)
+
+        final_model_k2 = model_nonbubble[k2] + mu_pos[k2] + mu_neg[k2]
+
+        print(f"k={k2} closure check:")
+        print("data sum            =", float(np.sum(counts[k2][mfit])))
+        print("nonbubble model sum =", float(np.sum(model_nonbubble[k2][mfit])))
+        print("bubble pos sum      =", float(np.sum(mu_pos[k2][mfit])))
+        print("bubble neg sum      =", float(np.sum(mu_neg[k2][mfit])))
+        print("final residual sum  =", float(np.sum((counts[k2] - final_model_k2)[mfit])))
+        print("max abs residual    =", float(np.max(np.abs((counts[k2] - final_model_k2)[mfit]))))
+
+        pm = np.asarray(pos_mask, bool) & mfit
+        nm = np.asarray(neg_mask, bool) & mfit
+        print("diagnostics (morph masks, within fit mask):")
+        print("  bubble pos sum in pos_mask =", float(np.sum(mu_pos[k2][pm])))
+        print("  bubble neg sum in neg_mask =", float(np.sum(mu_neg[k2][nm])))
 
     def _template_scale_report(*, k: int, data2d: np.ndarray, mu2d: np.ndarray, mask2d: np.ndarray, label: str):
         m = np.asarray(mask2d, bool)

@@ -704,12 +704,12 @@ def main():
     )
     ap.add_argument(
         "--mcmc-dir-nohalo",
-        default=None,
+        default=os.path.join(repo_dir_default, "Totani_paper_check", "mcmc", "mcmc_results_fig4"),
         help="MCMC directory for the fit WITHOUT halo component.",
     )
     ap.add_argument(
         "--mcmc-dir-halo",
-        default=None,
+        default=os.path.join(repo_dir_default, "Totani_paper_check", "mcmc", "mcmc_results_fig6"),
         help="MCMC directory for the fit WITH halo component.",
     )
     ap.add_argument(

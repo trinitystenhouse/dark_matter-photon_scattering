@@ -69,11 +69,11 @@ def main():
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    _, hdr_cnt, Emin, Emax, Ectr, dE = read_counts_and_ebounds(args.counts)
-    nE = int(Ectr.size)
+    _, hdr, Emin_mev, Emax_mev, Ectr_mev, dE_mev = read_counts_and_ebounds(args.counts)
+    nE = int(Ectr_mev.size)
 
-    w_tgt = WCS(hdr_cnt).celestial
-    ny, nx = hdr_cnt["NAXIS2"], hdr_cnt["NAXIS1"]
+    w_tgt = WCS(hdr).celestial
+    ny, nx = hdr["NAXIS2"], hdr["NAXIS1"]
 
     omega = pixel_solid_angle_map(w_tgt, ny, nx, args.binsz)
 
@@ -83,26 +83,26 @@ def main():
     if expo.shape[0] != nE:
         if E_exp is None:
             raise RuntimeError("Exposure has different #planes and no energy axis.")
-        expo = interp_energy_planes(expo, E_exp, Ectr)
+        expo = interp_energy_planes(expo, E_exp, Ectr_mev)
 
     pion_cube, w_pion, E_pion, _hdr_pion = read_mapcube_primary(args.pion)
     brem_cube, w_brem, E_brem, _hdr_brem = read_mapcube_primary(args.bremss)
 
-    pion_E = _mapcube_to_counts_energy_grid(pion_cube, E_pion, Ectr)
-    brem_E = _mapcube_to_counts_energy_grid(brem_cube, E_brem, Ectr)
+    pion_E = _mapcube_to_counts_energy_grid(pion_cube, E_pion, Ectr_mev)
+    brem_E = _mapcube_to_counts_energy_grid(brem_cube, E_brem, Ectr_mev)
 
     pion_on_grid = reproject_cube_to_target(src_cube=pion_E, w_src=w_pion, w_tgt=w_tgt, ny_tgt=ny, nx_tgt=nx)
     brem_on_grid = reproject_cube_to_target(src_cube=brem_E, w_src=w_brem, w_tgt=w_tgt, ny_tgt=ny, nx_tgt=nx)
 
     gas_dnde = pion_on_grid + brem_on_grid
 
-    mu_gas = gas_dnde * expo * omega[None, :, :] * dE[:, None, None]
+    mu_gas = gas_dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
 
     out_dnde = os.path.join(args.outdir, "gas_dnde.fits")
     out_mu = os.path.join(args.outdir, "mu_gas_counts.fits")
 
-    write_cube(out_dnde, gas_dnde, hdr_cnt, bunit="ph cm-2 s-1 sr-1 MeV-1")
-    write_cube(out_mu, mu_gas, hdr_cnt, bunit="counts")
+    write_cube(out_dnde, gas_dnde, hdr, bunit="ph cm-2 s-1 sr-1 MeV-1")
+    write_cube(out_mu, mu_gas, hdr, bunit="counts")
 
     print("✓ Wrote", out_dnde)
     print("✓ Wrote", out_mu)

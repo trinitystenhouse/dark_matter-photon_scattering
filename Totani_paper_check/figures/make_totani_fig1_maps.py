@@ -125,7 +125,7 @@ def main():
     ap.add_argument("--mu-loopI", default=os.path.join(data_dir, "processed", "templates", "mu_loopI_counts.fits"))
     ap.add_argument("--mu-fb-flat", default=os.path.join(data_dir, "processed", "templates", "mu_fb_flat_counts.fits"))
     ap.add_argument("--fb-flat-dnde", default=os.path.join(data_dir, "processed", "templates", "fb_flat_dnde.fits"))
-    ap.add_argument("--bubble-mask", default=os.path.join(data_dir, "processed", "templates", "bubbles_flat_binary_mask.fits"))
+    ap.add_argument("--bubble-mask", default=os.path.join(data_dir, "processed", "templates", "fb_flat_mask.fits"))
 
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
@@ -231,15 +231,15 @@ def main():
         ax.set_xlabel("l")
         ax.set_ylabel("b")
 
-        if float(target_mev) == float(args.target_mev[0]):
-            vmin, vmax = -5e-10, 5e-10
-        elif len(args.target_mev) > 1 and float(target_mev) == float(args.target_mev[1]):
-            vmin, vmax = -5e-11, 5e-11
-        else:
-            vmax = np.nanpercentile(np.abs(bubble_flux_smooth_k), 99.5)
-            if not np.isfinite(vmax) or vmax <= 0:
-                vmax = 1.0
-            vmin = -vmax
+        # if float(target_mev) == float(args.target_mev[0]):
+        #     vmin, vmax = -5e-10, 5e-10
+        # elif len(args.target_mev) > 1 and float(target_mev) == float(args.target_mev[1]):
+        #     vmin, vmax = -5e-11, 5e-11
+        # else:
+        vmax = np.nanpercentile(np.abs(bubble_flux_smooth_k), 99.5)
+        if not np.isfinite(vmax) or vmax <= 0:
+            vmax = 1.0
+        vmin = -vmax
 
         im = ax.imshow(bubble_flux_smooth_k, origin="lower", cmap="coolwarm", vmin=vmin, vmax=vmax)
         ax.set_title(f"Best-fit bubble image (flux), smoothed $\\sigma$=1$^\\circ$\nE={Ectr[k]/1000:.3g} GeV (k={k})")

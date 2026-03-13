@@ -23,6 +23,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import gaussian_filter
+import os
 
 
 def read_counts_and_ebounds(counts_path):
@@ -31,10 +32,24 @@ def read_counts_and_ebounds(counts_path):
         hdr = h[0].header
         eb = h["EBOUNDS"].data
 
-    Emin = eb["E_MIN"].astype(float) / 1000.0
-    Emax = eb["E_MAX"].astype(float) / 1000.0
+    Emin = eb["E_MIN"].astype(float)/1000
+    Emax = eb["E_MAX"].astype(float)/1000
+
+    if str(os.environ.get("TOTANI_DEBUG_ENERGY", "0")).strip() not in ("", "0", "false", "False"):
+        med_raw = float(np.nanmedian(Emax)) if Emax.size else np.nan
+        print(f"[energy-debug][counts] {counts_path}")
+        print(f"[energy-debug][counts] raw Emax median={med_raw:.6g}")
+        print(f"[energy-debug][counts] raw Emin[:5]={np.asarray(Emin)[:5]}")
+        print(f"[energy-debug][counts] raw Emax[:5]={np.asarray(Emax)[:5]}")
+
     Ectr = np.sqrt(Emin * Emax)
     dE = (Emax - Emin)
+
+    if str(os.environ.get("TOTANI_DEBUG_ENERGY", "0")).strip() not in ("", "0", "false", "False"):
+        med_out = float(np.nanmedian(Emax)) if Emax.size else np.nan
+        print(f"[energy-debug][counts] canonical(MeV) Emax median={med_out:.6g}")
+        print(f"[energy-debug][counts] Ectr[:5]={np.asarray(Ectr)[:5]}")
+        print(f"[energy-debug][counts] dE[:5]={np.asarray(dE)[:5]}")
     return counts, hdr, Emin, Emax, Ectr, dE
 
 
@@ -66,7 +81,7 @@ def read_mapcube_primary(path):
             eb = h["EBOUNDS"].data
             Emin = np.array(eb["E_MIN"], float)
             Emax = np.array(eb["E_MAX"], float)
-            E = np.sqrt(Emin * Emax)
+            E = np.sqrt(Emin * Emax) #in GeV
 
     if data.ndim != 3:
         raise RuntimeError(f"Expected 3D mapcube in primary HDU; got shape {data.shape}")
@@ -181,7 +196,31 @@ def read_exposure(expo_path):
             Emin = np.array(eb["E_MIN"], float)
             Emax = np.array(eb["E_MAX"], float)
             E_expo = np.sqrt(Emin * Emax)
+
+    if str(os.environ.get("TOTANI_DEBUG_ENERGY", "0")).strip() not in ("", "0", "false", "False"):
+        med_raw = float(np.nanmedian(E_expo)) if (E_expo is not None and E_expo.size) else np.nan
+        print(f"[energy-debug][expo] {expo_path}")
+        print(f"[energy-debug][expo] raw E median={med_raw:.6g}")
+        if E_expo is not None:
+            print(f"[energy-debug][expo] raw E[:5]={np.asarray(E_expo)[:5]}")
+
+    # Canonicalize to MeV.
+    if E_expo is not None:
+        med = float(np.nanmedian(E_expo)) if E_expo.size else np.nan
+        if np.isfinite(med) and (med < 1000.0):
+            # GeV -> MeV
+            E_expo = E_expo * 1000.0
+        elif np.isfinite(med) and (med > 1e8):
+            # keV -> MeV
+            E_expo = E_expo / 1000.0
+
+    if str(os.environ.get("TOTANI_DEBUG_ENERGY", "0")).strip() not in ("", "0", "false", "False"):
+        med_out = float(np.nanmedian(E_expo)) if (E_expo is not None and E_expo.size) else np.nan
+        print(f"[energy-debug][expo] canonical(MeV) E median={med_out:.6g}")
+        if E_expo is not None:
+            print(f"[energy-debug][expo] E[:5]={np.asarray(E_expo)[:5]}")
     return expo, E_expo
+
 
 def read_expcube_energies_mev(hdul):
     """

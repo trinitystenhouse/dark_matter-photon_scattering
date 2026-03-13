@@ -52,8 +52,8 @@ def main():
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    _, hdr_cnt, Emin, Emax, Ectr, dE = read_counts_and_ebounds(args.counts)
-    nE = int(Ectr.size)
+    _, hdr_cnt, Emin_mev, Emax_mev, Ectr_mev, dE_mev = read_counts_and_ebounds(args.counts)
+    nE = int(Ectr_mev.size)
 
     w_tgt = WCS(hdr_cnt).celestial
     ny, nx = hdr_cnt["NAXIS2"], hdr_cnt["NAXIS1"]
@@ -66,7 +66,7 @@ def main():
     if expo.shape[0] != nE:
         if E_exp is None:
             raise RuntimeError("Exposure has different #planes and no energy axis.")
-        expo = interp_energy_planes(expo, E_exp, Ectr)
+        expo = interp_energy_planes(expo, E_exp, Ectr_mev)
 
     ics_cube, w_src, E_ics, _hdr_ics = read_mapcube_primary(args.ics)
     if E_ics is None:
@@ -76,7 +76,7 @@ def main():
     else:
         if ics_cube.shape[0] != len(E_ics):
             raise RuntimeError("ICS cube energy axis length mismatch.")
-        ics_E = interp_energy_planes(ics_cube, E_ics, Ectr) if ics_cube.shape[0] != nE else ics_cube
+        ics_E = interp_energy_planes(ics_cube, E_ics, Ectr_mev) if ics_cube.shape[0] != nE else ics_cube
 
     ics_on_grid = reproject_cube_to_target(src_cube=ics_E, w_src=w_src, w_tgt=w_tgt, ny_tgt=ny, nx_tgt=nx)
 
@@ -85,7 +85,7 @@ def main():
 
     # Expected counts per bin:
     # mu = (dN/dE) * exposure * Ω_pix * ΔE
-    mu_ics = ics_dnde * expo * omega[None, :, :] * dE[:, None, None]
+    mu_ics = ics_dnde * expo * omega[None, :, :] * dE_mev[:, None, None]
 
     out_dnde = os.path.join(args.outdir, "ics_dnde.fits")
     out_mu = os.path.join(args.outdir, "mu_ics_counts.fits")

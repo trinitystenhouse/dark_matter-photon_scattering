@@ -20,11 +20,15 @@ __pycache__
 Totani_paper_check/make_templates/debug_plots
 Totani_paper_check/check_templates/plots_check_*
 Totani_paper_check/figures/fig*/plots*
+Totani_paper_check/*/plots*
 Totani_paper_check/mcmc/mcmc_results*
 */__pycache__/*
 */mcmc_coefficients*.txt
+*/sanity_plots/*
 
 Fermionic_DM_Eff_Operator/_*
 Fermionic_DM_Eff_Operator/plots
 Scalar_DM_Eff_Operator/_*
 Scalar_DM_Eff_Operator/plots
+
+*.par
